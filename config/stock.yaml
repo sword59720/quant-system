@@ -1,0 +1,22 @@
+enabled: true
+market: CN_STOCK
+mode: etf_rotation_weekly
+
+capital_alloc_pct: 0.70
+
+universe:
+  - "510300"
+  - "510500"
+  - "512100"
+  - "159915"
+  - "511010"
+
+signal:
+  momentum_lookback_days: [20, 60]
+  momentum_weights: [0.6, 0.4]
+  rebalance_weekday: 1
+  top_n: 2
+
+filters:
+  min_avg_turnover_cny: 50000000
+  suspend_filter: true

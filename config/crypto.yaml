@@ -1,0 +1,22 @@
+enabled: true
+market: CRYPTO_SPOT
+exchange: htx_direct
+mode: momentum_rotation_4h
+
+capital_alloc_pct: 0.30
+
+symbols:
+  - "BTC/USDT"
+  - "ETH/USDT"
+
+signal:
+  timeframe: "4h"
+  momentum_lookback_bars: [30, 90]
+  momentum_weights: [0.6, 0.4]
+  rebalance_every_hours: 4
+  top_n: 1
+
+defense:
+  use_usdt_defense: true
+  risk_off_threshold_pct: -3.0
+  stop_loss_pct: 4.0

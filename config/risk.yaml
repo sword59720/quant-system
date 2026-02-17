@@ -1,0 +1,15 @@
+global:
+  max_total_drawdown_pct: 12
+  reduce_risk_drawdown_pct: 8
+  kill_switch: false
+
+position_limits:
+  stock_single_max_pct: 0.50
+  crypto_single_max_pct: 0.30
+  stock_total_max_pct: 0.70
+  crypto_total_max_pct: 0.30
+
+trade_guards:
+  max_trades_per_day_stock: 1
+  max_trades_per_day_crypto: 2
+  min_cash_reserve_pct: 0.10

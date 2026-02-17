@@ -1,0 +1,10 @@
+enabled: true
+env: paper          # paper | live
+timezone: Asia/Shanghai
+base_currency: CNY
+total_capital: 20000
+
+paths:
+  data_dir: ./data
+  output_dir: ./outputs
+  log_dir: ./logs

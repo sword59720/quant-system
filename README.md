@@ -1,0 +1,233 @@
+# Quant System 使用说明（股票 + 币圈）
+
+> 适用环境：树莓派 4B（2GB）+ OpenClaw Gateway 已运行
+>
+> 当前策略模式：
+> - 股票：A股 ETF（周频调仓）
+> - 币圈：HTX 直连（每4小时计算）
+> - 全局：Paper 模式（模拟）
+
+---
+
+## 1. 项目目录
+
+项目根目录：
+
+```bash
+/home/haojc/.openclaw/workspace/quant-system
+```
+
+核心目录：
+
+- `config/`：配置文件
+- `scripts/`：执行脚本
+- `data/`：行情数据
+- `outputs/orders/`：目标仓位输出
+- `outputs/reports/`：巡检报告
+- `logs/`：运行日志
+
+---
+
+## 2. 首次安装（仅一次）
+
+```bash
+cd /home/haojc/.openclaw/workspace/quant-system
+python3 -m venv .venv
+./.venv/bin/pip install -r requirements.txt
+```
+
+---
+
+## 3. 配置说明
+
+### 3.1 总开关（强烈建议）
+
+文件：`config/runtime.yaml`
+
+```yaml
+enabled: true
+```
+
+- `true`：系统运行
+- `false`：系统停机（即使 cron 触发也会立即退出）
+
+### 3.2 关键配置
+
+- `config/stock.yaml`：股票策略参数（ETF池、动量窗口、top_n）
+- `config/crypto.yaml`：币圈参数（当前 `exchange: htx_direct`）
+- `config/risk.yaml`：风控参数（仓位上限、回撤阈值等）
+
+---
+
+## 4. 手动运行
+
+## 4.1 股票（拉数据 + 生成目标）
+
+```bash
+cd /home/haojc/.openclaw/workspace/quant-system
+./.venv/bin/python scripts/fetch_stock_data.py
+./.venv/bin/python scripts/run_stock.py
+```
+
+## 4.2 币圈（HTX直连拉数据 + 生成目标）
+
+```bash
+cd /home/haojc/.openclaw/workspace/quant-system
+./.venv/bin/python scripts/fetch_crypto_data.py
+./.venv/bin/python scripts/run_crypto.py
+```
+
+## 4.3 一键全流程
+
+```bash
+cd /home/haojc/.openclaw/workspace/quant-system
+./.venv/bin/python scripts/run_all.py
+```
+
+---
+
+## 5. 自动运行（cron）
+
+当前已生效计划（practical mode）：
+
+- 股票数据：工作日 16:05
+- 股票调仓信号：每周一 16:10
+- 币圈数据：每4小时第5分钟
+- 币圈信号：每4小时第7分钟
+- 健康检查：每天 13:10
+
+查看当前计划：
+
+```bash
+crontab -l
+```
+
+---
+
+## 6. 停止 / 启动系统
+
+已提供快捷脚本：
+
+- `scripts/stop_system.sh`
+- `scripts/start_system.sh`
+
+用法：
+
+```bash
+cd /home/haojc/.openclaw/workspace/quant-system
+./scripts/stop_system.sh
+./scripts/start_system.sh
+```
+
+这两个脚本本质是切换 `config/runtime.yaml` 中的 `enabled`。
+
+---
+
+## 7. 输出文件说明
+
+- 股票目标仓位：`outputs/orders/stock_targets.json`
+- 币圈目标仓位：`outputs/orders/crypto_targets.json`
+- 巡检结果：`outputs/reports/healthcheck_latest.log`
+
+查看示例：
+
+```bash
+cat outputs/orders/stock_targets.json
+cat outputs/orders/crypto_targets.json
+cat outputs/reports/healthcheck_latest.log
+```
+
+---
+
+## 8. 日志与排错
+
+常看日志：
+
+```bash
+tail -n 100 logs/cron_stock.log
+tail -n 100 logs/cron_crypto.log
+tail -n 100 logs/cron_health.log
+```
+
+快速筛错：
+
+```bash
+grep -E "Traceback|ERROR|failed" logs/cron_*.log | tail -n 50
+```
+
+---
+
+## 9. 当前策略逻辑（简述）
+
+- 股票：ETF **多因子**（动量+低波动+回撤+流动性）综合打分，选 Top N（当前2个）
+- 股票风险开关：基准ETF（510300）若低于 MA120，则股票总仓位减半
+- 币圈：BTC/ETH **多因子**（动量+低波动+回撤）打分，选 Top N（当前1个）
+- 币圈防守：若短期收益都低于阈值（`risk_off_threshold_pct`），转入 USDT
+- 仓位：按 `capital_alloc_pct` 与单标的上限分配
+
+> 注意：当前为 Paper 模式，输出的是目标仓位，不是实盘下单回执。
+
+---
+
+## 10. 常见问题
+
+### Q1：为什么脚本触发了但没动作？
+A：检查 `config/runtime.yaml` 是否 `enabled: false`。
+
+### Q2：币圈没有数据或分数为空？
+A：先手动执行：
+
+```bash
+./.venv/bin/python scripts/fetch_crypto_data.py
+```
+
+再看 `data/crypto/*.csv` 是否生成。
+
+### Q3：如何临时停机但保留 cron？
+A：执行：
+
+```bash
+./scripts/stop_system.sh
+```
+
+恢复时：
+
+```bash
+./scripts/start_system.sh
+```
+
+---
+
+## 11. 实盘切换前检查清单（强烈建议）
+
+> 当前系统默认 `env: paper`。切换实盘前，请逐项确认：
+
+- [ ] 过去 2~4 周 paper 运行稳定（无连续报错）
+- [ ] `logs/cron_*.log` 无高频 `Traceback/ERROR/failed`
+- [ ] 股票/币圈数据文件持续更新（非陈旧文件）
+- [ ] 风控阈值已确认（`config/risk.yaml`）
+- [ ] 交易所/券商 API 权限最小化（只开交易，禁提现）
+- [ ] API Key 不写入代码仓库（仅本机安全存储）
+- [ ] 已设置最大单日亏损/回撤处理预案
+- [ ] 已完成小额实盘演练（先小资金）
+- [ ] 明确人工接管流程（紧急停机：`./scripts/stop_system.sh`）
+
+### 实盘切换最小步骤
+
+1. 修改 `config/runtime.yaml`：
+
+```yaml
+env: live
+enabled: true
+```
+
+2. 手动单次试跑（先非交易时段验证流程）：
+
+```bash
+./.venv/bin/python scripts/fetch_crypto_data.py
+./.venv/bin/python scripts/run_crypto.py
+```
+
+3. 确认输出与日志正常，再开放自动调度。
+
+> 建议：先用小仓位实盘 1~2 周，再逐步增加资金。
