@@ -25,6 +25,7 @@ from core.signal import (
 )
 from core.execution_guard import resolve_min_turnover
 from core.exposure_gate import evaluate_exposure_gate
+from core.notify_wecom import send_wecom_message
 
 
 def load_yaml(path):
@@ -655,6 +656,40 @@ def main():
 
     print(f"[stock] done -> {out_file}")
     print(json.dumps(out, ensure_ascii=False, indent=2))
+
+    # 企业微信通知：目标仓位 + 风控处罚/执行拦截
+    try:
+        tgt = ", ".join([f"{x['symbol']}:{x['target_weight']:.2f}" for x in out.get("targets", [])]) or "无"
+        lines = [
+            f"时间: {out.get('ts','')}",
+            f"市场: stock",
+            f"模式: {out.get('mode','')}",
+            f"目标仓位: {tgt}",
+        ]
+        ok, msg = send_wecom_message("\n".join(lines), title="目标仓位更新")
+        print(f"[notify] wecom {'ok' if ok else 'fail'}: {msg}")
+
+        # 风控异常处罚通知
+        overlay = out.get("risk_overlay", {})
+        guard = out.get("execution_guard", {})
+        punish = False
+        reason = []
+        if overlay.get("state_active", False) or overlay.get("triggered", False):
+            punish = True
+            reason.append(f"risk_overlay={overlay.get('reason', 'active')}")
+        if guard.get("action") == "hold":
+            punish = True
+            reason.append(f"execution_guard={guard.get('reason','hold')}")
+        if punish:
+            send_wecom_message(
+                "风控处罚触发：" + ", ".join(reason) + f"\n当前目标仓位: {tgt}",
+                title="风控状态异常触发",
+                dedup_key="risk_stock_trigger",
+                dedup_hours=24,
+            )
+    except Exception as e:
+        print(f"[notify] wecom error: {e}")
+
     return EXIT_OK
 
 

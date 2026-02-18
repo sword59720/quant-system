@@ -17,6 +17,7 @@ from core.exit_codes import (
     EXIT_OUTPUT_ERROR,
 )
 from core.signal import momentum_score, volatility_score, max_drawdown_score, normalize_rank
+from core.notify_wecom import send_wecom_message
 
 
 def load_yaml(path):
@@ -155,6 +156,28 @@ def main():
 
     print(f"[crypto] done -> {out_file}")
     print(json.dumps(out, ensure_ascii=False, indent=2))
+
+    # 企业微信通知：目标仓位 + 风控状态
+    try:
+        tgt = ", ".join([f"{x['symbol']}:{x['target_weight']:.2f}" for x in out.get("targets", [])]) or "无"
+        lines = [
+            f"时间: {out.get('ts','')}",
+            f"市场: crypto",
+            f"risk_off: {out.get('risk_off', False)}",
+            f"目标仓位: {tgt}",
+        ]
+        ok, msg = send_wecom_message("\n".join(lines), title="目标仓位更新")
+        print(f"[notify] wecom {'ok' if ok else 'fail'}: {msg}")
+        if out.get("risk_off", False):
+            send_wecom_message(
+                "币圈风控触发 risk_off，已切换/保持防守仓位。",
+                title="风控状态异常触发",
+                dedup_key="risk_crypto_trigger",
+                dedup_hours=24,
+            )
+    except Exception as e:
+        print(f"[notify] wecom error: {e}")
+
     return EXIT_OK
 
 

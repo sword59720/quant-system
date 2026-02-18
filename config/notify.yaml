@@ -1,0 +1,7 @@
+enabled: true
+wecom_bridge:
+  endpoint: "http://16.144.176.211:4000/proactive/send"
+  to_user: "HaoJianCai"
+  api_token: "vZADPRHyHcjwUB5G52crYTsRVJ1dT2kbu0aiqqdfHSw3M-V8kWOQcUTjBmyjWf4W"
+  sign_secret: "rb2mN6Ql-KLuywWTH7zH65sSEauYJMYRSNX0hPv3-hyEWTNWP6335Qk73Ic3Hg5z"
+  timeout_sec: 10
