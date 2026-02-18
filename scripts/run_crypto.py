@@ -9,6 +9,13 @@ import pandas as pd
 from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from core.exit_codes import (
+    EXIT_CONFIG_ERROR,
+    EXIT_DATA_FORMAT_ERROR,
+    EXIT_DISABLED,
+    EXIT_OK,
+    EXIT_OUTPUT_ERROR,
+)
 from core.signal import momentum_score, volatility_score, max_drawdown_score, normalize_rank
 
 
@@ -21,18 +28,11 @@ def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
 
 
-def main():
-    runtime = load_yaml("config/runtime.yaml")
-    crypto = load_yaml("config/crypto.yaml")
-    risk = load_yaml("config/risk.yaml")
-
+def build_crypto_targets(runtime, crypto, risk):
     if not runtime.get("enabled", True):
-        print("[system] disabled by config/runtime.yaml: enabled=false")
-        return
-
+        raise RuntimeError("runtime disabled")
     if not crypto.get("enabled", False):
-        print("[crypto] disabled")
-        return
+        raise RuntimeError("crypto disabled")
 
     env = runtime.get("env", "paper")
     total_capital = runtime.get("total_capital", 20000)
@@ -72,6 +72,9 @@ def main():
         except Exception:
             continue
 
+    if not raw:
+        raise RuntimeError("no valid crypto symbol data")
+
     mom_rank = normalize_rank({k: v["momentum"] for k, v in raw.items()}, ascending=False)
     vol_rank = normalize_rank({k: v["vol"] for k, v in raw.items()}, ascending=True)
     dd_rank = normalize_rank({k: v["drawdown"] for k, v in raw.items()}, ascending=False)
@@ -104,11 +107,7 @@ def main():
     elif crypto.get("defense", {}).get("use_usdt_defense", True):
         targets = [{"symbol": "USDT", "target_weight": round(alloc_pct, 4)}]
 
-    output_dir = runtime["paths"]["output_dir"]
-    ensure_dir(output_dir)
-    ensure_dir(os.path.join(output_dir, "orders"))
-
-    out = {
+    return {
         "ts": datetime.now().isoformat(),
         "market": "crypto",
         "env": env,
@@ -120,13 +119,44 @@ def main():
         "note": "v3 multifactor targets",
     }
 
-    out_file = os.path.join(output_dir, "orders", "crypto_targets.json")
-    with open(out_file, "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=2)
+def main():
+    try:
+        runtime = load_yaml("config/runtime.yaml")
+        crypto = load_yaml("config/crypto.yaml")
+        risk = load_yaml("config/risk.yaml")
+    except Exception as e:
+        print(f"[crypto] config error: {e}")
+        return EXIT_CONFIG_ERROR
+
+    if not runtime.get("enabled", True):
+        print("[system] disabled by config/runtime.yaml: enabled=false")
+        return EXIT_DISABLED
+
+    if not crypto.get("enabled", False):
+        print("[crypto] disabled")
+        return EXIT_DISABLED
+
+    try:
+        out = build_crypto_targets(runtime, crypto, risk)
+    except Exception as e:
+        print(f"[crypto] data/signal error: {e}")
+        return EXIT_DATA_FORMAT_ERROR
+
+    try:
+        output_dir = runtime["paths"]["output_dir"]
+        ensure_dir(output_dir)
+        ensure_dir(os.path.join(output_dir, "orders"))
+        out_file = os.path.join(output_dir, "orders", "crypto_targets.json")
+        with open(out_file, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[crypto] output error: {e}")
+        return EXIT_OUTPUT_ERROR
 
     print(f"[crypto] done -> {out_file}")
     print(json.dumps(out, ensure_ascii=False, indent=2))
+    return EXIT_OK
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

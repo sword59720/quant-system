@@ -1,8 +1,36 @@
 enabled: true
 market: CN_STOCK
-mode: etf_rotation_weekly
+mode: global_momentum
+backtest_mode: production  # production | research
 
 capital_alloc_pct: 0.70
+
+benchmark_symbol: "510300"
+defensive_symbol: "511010"
+
+global_model:
+  rebalance_days: 20
+  momentum_lb: 252
+  ma_window: 180
+  vol_window: 50
+  top_n: 4
+  fee: 0.0008
+  min_score: 0.0
+  defensive_bypass_single_max: true
+  execution_guard:
+    enabled: true
+    min_rebalance_days: 30
+    min_turnover: 0.03
+    force_rebalance_on_regime_change: false
+  risk_overlay:
+    enabled: true
+    monitor_file: ./outputs/reports/stock_paper_forward_latest.json
+    trigger_excess_20d_vs_alloc: -0.02
+    trigger_strategy_drawdown: -0.12
+    release_excess_20d_vs_alloc: 0.01
+    release_strategy_drawdown: -0.06
+    min_defense_days: 10
+    sticky_mode: true
 
 universe:
   - "510300"

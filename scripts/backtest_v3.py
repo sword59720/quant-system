@@ -6,11 +6,15 @@ import sys
 import json
 import yaml
 import math
+import tempfile
+import argparse
 import pandas as pd
 from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from core.exit_codes import EXIT_CONFIG_ERROR, EXIT_OK, EXIT_OUTPUT_ERROR, EXIT_SIGNAL_ERROR
 from core.signal import momentum_score, volatility_score, max_drawdown_score, liquidity_score, normalize_rank
+from scripts.paper_forward_stock import run_paper_forward
 
 
 def load_yaml(path):
@@ -54,7 +58,158 @@ def summarize(nav, ret, ppy):
     }
 
 
-def backtest_stock(runtime, stock_cfg):
+def backtest_stock_global_momentum_research(runtime, stock_cfg):
+    data_dir = os.path.join(runtime["paths"]["data_dir"], "stock")
+    benchmark_symbol = stock_cfg.get("benchmark_symbol", "510300")
+    defensive_symbol = stock_cfg.get("defensive_symbol", "511010")
+    alloc_pct = float(stock_cfg.get("capital_alloc_pct", 0.7))
+
+    model_cfg = stock_cfg.get("global_model", {})
+    rebalance_days = int(model_cfg.get("rebalance_days", 20))
+    momentum_lb = int(model_cfg.get("momentum_lb", 252))
+    ma_window = int(model_cfg.get("ma_window", 200))
+    vol_window = int(model_cfg.get("vol_window", 20))
+    top_n = int(model_cfg.get("top_n", 1))
+    min_score = float(model_cfg.get("min_score", 0.0))
+    fee = float(model_cfg.get("fee", 0.0008))
+
+    universe = sorted(set(stock_cfg.get("universe", []) + [benchmark_symbol, defensive_symbol]))
+    frames = {}
+    for s in universe:
+        fp = os.path.join(data_dir, f"{s}.csv")
+        if not os.path.exists(fp):
+            continue
+        df = pd.read_csv(fp)
+        if "date" not in df.columns or "close" not in df.columns:
+            continue
+        df["date"] = pd.to_datetime(df["date"])
+        frames[s] = df.sort_values("date").set_index("date")
+
+    if benchmark_symbol not in frames or defensive_symbol not in frames:
+        return {"error": "benchmark or defensive data missing"}
+
+    dates = sorted(set.intersection(*[set(f.index) for f in frames.values()]))
+    if len(dates) < 400:
+        return {"error": "stock history too short (<400 days common)"}
+
+    prices = pd.DataFrame({s: frames[s].loc[dates, "close"] for s in frames.keys()}, index=dates).sort_index()
+    ret = prices.pct_change().fillna(0.0)
+
+    start_idx = max(momentum_lb, ma_window, vol_window)
+    if start_idx >= len(prices) - 1:
+        return {"error": "not enough history for research backtest"}
+
+    symbols = list(prices.columns)
+    risk_symbols = [s for s in symbols if s != defensive_symbol]
+    weights = {s: 0.0 for s in symbols}
+    weights[defensive_symbol] = alloc_pct
+    nav = [1.0]
+    rets = []
+    bench_nav_alloc = [1.0]
+
+    for i in range(start_idx, len(prices) - 1):
+        target = weights.copy()
+        if i % rebalance_days == 0:
+            scores = {}
+            vols = {}
+            for s in risk_symbols:
+                m = prices[s].iloc[i] / prices[s].iloc[i - momentum_lb] - 1.0
+                v = float(ret[s].iloc[i - vol_window + 1 : i + 1].std())
+                if v <= 0:
+                    continue
+                vols[s] = v
+                scores[s] = float(m / max(v, 1e-6))
+            regime_ok = prices[benchmark_symbol].iloc[i] >= prices[benchmark_symbol].iloc[i - ma_window + 1 : i + 1].mean()
+            eligible = [s for s in risk_symbols if s in scores and scores[s] > min_score]
+
+            sleeve = {s: 0.0 for s in symbols}
+            if (not regime_ok) or (not eligible):
+                sleeve[defensive_symbol] = 1.0
+            else:
+                picks = sorted(eligible, key=lambda s: scores[s], reverse=True)[:top_n]
+                inv_vol = {s: 1.0 / max(float(vols[s]), 1e-6) for s in picks}
+                total_inv = sum(inv_vol.values())
+                for s, v in inv_vol.items():
+                    sleeve[s] = v / total_inv
+
+            target = {s: sleeve.get(s, 0.0) * alloc_pct for s in symbols}
+
+        turnover = sum(abs(target[s] - weights.get(s, 0.0)) for s in symbols)
+        day_ret = 0.0
+        for s, w in target.items():
+            if w == 0.0:
+                continue
+            day_ret += w * (prices[s].iloc[i + 1] / prices[s].iloc[i] - 1.0)
+        day_ret -= turnover * fee
+
+        bench_ret_alloc = alloc_pct * (prices[benchmark_symbol].iloc[i + 1] / prices[benchmark_symbol].iloc[i] - 1.0)
+
+        weights = target
+        nav.append(nav[-1] * (1.0 + day_ret))
+        rets.append(day_ret)
+        bench_nav_alloc.append(bench_nav_alloc[-1] * (1.0 + bench_ret_alloc))
+
+    summary = summarize(nav, rets, 252)
+    bench_nav_alloc = pd.Series(bench_nav_alloc)
+    benchmark_ann_alloc = annualized_return(bench_nav_alloc, 252)
+
+    summary.update(
+        {
+            "benchmark_annual_return_alloc": float(benchmark_ann_alloc),
+            "excess_annual_return_vs_alloc": float(summary["annual_return"] - benchmark_ann_alloc),
+            "mode": "global_momentum_research",
+        }
+    )
+    return summary
+
+
+def backtest_stock_production(runtime, stock_cfg, risk_cfg):
+    with tempfile.TemporaryDirectory() as td:
+        rt = json.loads(json.dumps(runtime))
+        rt["paths"]["output_dir"] = td
+        summary, _history_file, _latest_file = run_paper_forward(rt, stock_cfg, risk_cfg)
+    agg = summary["aggregate"]
+    latest = summary["latest"]
+    return {
+        "periods": int(agg["periods"]),
+        "annual_return": float(agg["strategy_annual_return"]),
+        "max_drawdown": float(agg["strategy_max_drawdown"]),
+        "sharpe": float(agg["strategy_sharpe"]),
+        "final_nav": float(latest["strategy_nav"]),
+        "benchmark_annual_return_alloc": float(agg["benchmark_annual_return_alloc"]),
+        "excess_annual_return_vs_alloc": float(agg["excess_annual_return_vs_alloc"]),
+        "mode": "global_momentum_production_aligned",
+    }
+
+
+def backtest_stock(runtime, stock_cfg, risk_cfg, backtest_mode_override=None):
+    if stock_cfg.get("mode") == "global_momentum":
+        backtest_mode = str(backtest_mode_override or stock_cfg.get("backtest_mode", "production")).lower()
+        if backtest_mode == "research":
+            result = backtest_stock_global_momentum_research(runtime, stock_cfg)
+            if "error" in result:
+                return {"error": result["error"]}
+            return result
+
+        if backtest_mode == "both":
+            try:
+                prod = backtest_stock_production(runtime, stock_cfg, risk_cfg)
+            except Exception as e:
+                return {"error": f"global_momentum production backtest failed: {e}"}
+            res = backtest_stock_global_momentum_research(runtime, stock_cfg)
+            if "error" in res:
+                return {"error": res["error"]}
+            return {
+                "mode": "global_momentum_both",
+                "production": prod,
+                "research": res,
+            }
+
+        try:
+            return backtest_stock_production(runtime, stock_cfg, risk_cfg)
+        except Exception as e:
+            return {"error": f"global_momentum paper-forward backtest failed: {e}"}
+
     data_dir = os.path.join(runtime["paths"]["data_dir"], "stock")
     universe = stock_cfg.get("universe", [])
     alloc_pct = float(stock_cfg.get("capital_alloc_pct", 0.7))
@@ -242,29 +397,52 @@ def backtest_crypto(runtime, crypto_cfg):
 
 
 def main():
-    runtime = load_yaml("config/runtime.yaml")
-    stock_cfg = load_yaml("config/stock.yaml")
-    crypto_cfg = load_yaml("config/crypto.yaml")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--stock-mode",
+        choices=["production", "research", "both"],
+        default=None,
+        help="override stock backtest mode (default: config/stock.yaml backtest_mode)",
+    )
+    args = parser.parse_args()
 
-    stock = backtest_stock(runtime, stock_cfg)
-    crypto = backtest_crypto(runtime, crypto_cfg)
+    try:
+        runtime = load_yaml("config/runtime.yaml")
+        stock_cfg = load_yaml("config/stock.yaml")
+        crypto_cfg = load_yaml("config/crypto.yaml")
+    except Exception as e:
+        print(f"[backtest] config error: {e}")
+        return EXIT_CONFIG_ERROR
+
+    try:
+        risk_cfg = load_yaml("config/risk.yaml")
+        stock = backtest_stock(runtime, stock_cfg, risk_cfg, backtest_mode_override=args.stock_mode)
+        crypto = backtest_crypto(runtime, crypto_cfg)
+    except Exception as e:
+        print(f"[backtest] signal error: {e}")
+        return EXIT_SIGNAL_ERROR
 
     report = {
         "ts": datetime.now().isoformat(),
-        "note": "v3.2 lightweight backtest (alloc-aware, threshold rebalance, risk-off)",
+        "note": "v3.5 lightweight backtest (stock: production/research/both via backtest_mode or --stock-mode; crypto: multifactor)",
         "stock": stock,
         "crypto": crypto,
     }
 
-    out_dir = os.path.join(runtime["paths"]["output_dir"], "reports")
-    ensure_dir(out_dir)
-    out = os.path.join(out_dir, "backtest_report.json")
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
+    try:
+        out_dir = os.path.join(runtime["paths"]["output_dir"], "reports")
+        ensure_dir(out_dir)
+        out = os.path.join(out_dir, "backtest_report.json")
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        print(f"[backtest] output error: {e}")
+        return EXIT_OUTPUT_ERROR
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
     print(f"[backtest] report -> {out}")
+    return EXIT_OK
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
