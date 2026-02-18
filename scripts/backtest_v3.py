@@ -58,6 +58,63 @@ def summarize(nav, ret, ppy):
     }
 
 
+def build_stock_compare(stock_result):
+    if not isinstance(stock_result, dict):
+        return {"available": False, "reason": "stock result is not a dict"}
+    if stock_result.get("mode") != "global_momentum_both":
+        return {"available": False, "reason": "stock mode is not global_momentum_both"}
+
+    prod = stock_result.get("production", {})
+    res = stock_result.get("research", {})
+    if (not isinstance(prod, dict)) or (not isinstance(res, dict)):
+        return {"available": False, "reason": "missing production/research result"}
+
+    higher_better = [
+        "annual_return",
+        "excess_annual_return_vs_alloc",
+        "sharpe",
+        "final_nav",
+    ]
+    deltas = {}
+    prod_better = []
+    res_better = []
+
+    for k in higher_better:
+        if k in prod and k in res:
+            deltas[k] = float(prod[k] - res[k])
+            if prod[k] > res[k]:
+                prod_better.append(k)
+            elif prod[k] < res[k]:
+                res_better.append(k)
+
+    if "max_drawdown" in prod and "max_drawdown" in res:
+        deltas["max_drawdown"] = float(prod["max_drawdown"] - res["max_drawdown"])
+        if prod["max_drawdown"] > res["max_drawdown"]:
+            prod_better.append("max_drawdown")
+        elif prod["max_drawdown"] < res["max_drawdown"]:
+            res_better.append("max_drawdown")
+
+    periods_equal = None
+    if "periods" in prod and "periods" in res:
+        periods_equal = bool(int(prod["periods"]) == int(res["periods"]))
+        deltas["periods"] = int(prod["periods"]) - int(res["periods"])
+
+    preferred_model = "tie"
+    if len(prod_better) > len(res_better):
+        preferred_model = "production"
+    elif len(prod_better) < len(res_better):
+        preferred_model = "research"
+
+    return {
+        "available": True,
+        "periods_equal": periods_equal,
+        "production_better_metrics": prod_better,
+        "research_better_metrics": res_better,
+        "preferred_model": preferred_model,
+        "deltas_production_minus_research": deltas,
+    }
+
+
 def backtest_stock_global_momentum_research(runtime, stock_cfg):
     data_dir = os.path.join(runtime["paths"]["data_dir"], "stock")
     benchmark_symbol = stock_cfg.get("benchmark_symbol", "510300")
@@ -69,6 +126,7 @@ def backtest_stock_global_momentum_research(runtime, stock_cfg):
     momentum_lb = int(model_cfg.get("momentum_lb", 252))
     ma_window = int(model_cfg.get("ma_window", 200))
     vol_window = int(model_cfg.get("vol_window", 20))
+    warmup_min_days = int(model_cfg.get("warmup_min_days", 126))
     top_n = int(model_cfg.get("top_n", 1))
     min_score = float(model_cfg.get("min_score", 0.0))
     fee = float(model_cfg.get("fee", 0.0008))
@@ -95,7 +153,8 @@ def backtest_stock_global_momentum_research(runtime, stock_cfg):
     prices = pd.DataFrame({s: frames[s].loc[dates, "close"] for s in frames.keys()}, index=dates).sort_index()
     ret = prices.pct_change().fillna(0.0)
 
-    start_idx = max(momentum_lb, ma_window, vol_window)
+    # Keep warmup aligned with paper-forward to make production/research comparable.
+    start_idx = max(momentum_lb, ma_window, vol_window, warmup_min_days) + 1
     if start_idx >= len(prices) - 1:
         return {"error": "not enough history for research backtest"}
 
@@ -424,23 +483,32 @@ def main():
 
     report = {
         "ts": datetime.now().isoformat(),
-        "note": "v3.5 lightweight backtest (stock: production/research/both via backtest_mode or --stock-mode; crypto: multifactor)",
+        "note": "v3.6 lightweight backtest (stock: production/research/both via backtest_mode or --stock-mode; crypto: multifactor)",
         "stock": stock,
         "crypto": crypto,
+    }
+    compare_report = {
+        "ts": report["ts"],
+        "note": "stock production vs research comparison summary",
+        "stock_compare": build_stock_compare(stock),
     }
 
     try:
         out_dir = os.path.join(runtime["paths"]["output_dir"], "reports")
         ensure_dir(out_dir)
-        out = os.path.join(out_dir, "backtest_report.json")
-        with open(out, "w", encoding="utf-8") as f:
+        out_report = os.path.join(out_dir, "backtest_report.json")
+        with open(out_report, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
+        out_compare = os.path.join(out_dir, "backtest_compare.json")
+        with open(out_compare, "w", encoding="utf-8") as f:
+            json.dump(compare_report, f, ensure_ascii=False, indent=2)
     except OSError as e:
         print(f"[backtest] output error: {e}")
         return EXIT_OUTPUT_ERROR
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    print(f"[backtest] report -> {out}")
+    print(f"[backtest] report -> {out_report}")
+    print(f"[backtest] compare -> {out_compare}")
     return EXIT_OK
 
 

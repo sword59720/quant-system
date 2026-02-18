@@ -13,6 +13,7 @@ global_model:
   momentum_lb: 252
   ma_window: 180
   vol_window: 50
+  warmup_min_days: 126
   top_n: 4
   fee: 0.0008
   min_score: 0.0
@@ -21,6 +22,13 @@ global_model:
     enabled: true
     min_rebalance_days: 30
     min_turnover: 0.03
+    dynamic_min_turnover:
+      enabled: true
+      alloc_ref: 0.70
+      min_multiplier: 0.60
+      max_multiplier: 1.40
+      floor: 0.018
+      ceil: 0.050
     force_rebalance_on_regime_change: false
   risk_overlay:
     enabled: true
@@ -31,6 +39,22 @@ global_model:
     release_strategy_drawdown: -0.06
     min_defense_days: 10
     sticky_mode: true
+  exposure_gate:
+    enabled: false
+    history_file: ./outputs/reports/stock_paper_forward_history.csv
+    lookback_days: [63, 126]
+    cpcv:
+      n_groups: 5
+      test_groups: 2
+      embargo_days: 1
+      min_fold_days: 12
+    thresholds:
+      warn_worst_min: -0.10
+      risk_worst_min: -0.14
+    alloc_caps:
+      pass: 0.70
+      warn: 0.60
+      risk: 0.50
 
 universe:
   - "510300"
@@ -48,3 +72,36 @@ signal:
 filters:
   min_avg_turnover_cny: 50000000
   suspend_filter: true
+
+validation:
+  cpcv:
+    enabled: true
+    # Window-specific CPCV setup tuned for current history length.
+    windows:
+      full:
+        start_date: null
+        n_groups: 8
+        test_groups: 3
+        embargo_days: 15
+        min_fold_days: 80
+      oos_2023:
+        start_date: "2023-01-03"
+        n_groups: 8
+        test_groups: 3
+        embargo_days: 15
+        min_fold_days: 60
+    # Suggested gate table (production promotion gate).
+    thresholds:
+      excess_ann_mean_min: 0.0200
+      excess_ann_median_min: 0.0150
+      excess_ann_worst_min: -0.0800
+      excess_ann_win_rate_min: 0.58
+      sharpe_median_min: 0.60
+      max_drawdown_worst_min: -0.22
+    # Parameter search for N / k / embargo.
+    search:
+      enabled: true
+      n_groups_candidates: [8, 10, 12]
+      test_groups_candidates: [2, 3]
+      embargo_days_candidates: [10, 15, 20, 30]
+      max_results: 12

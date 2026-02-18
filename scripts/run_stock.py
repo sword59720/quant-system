@@ -23,6 +23,8 @@ from core.signal import (
     liquidity_score,
     normalize_rank,
 )
+from core.execution_guard import resolve_min_turnover
+from core.exposure_gate import evaluate_exposure_gate
 
 
 def load_yaml(path):
@@ -61,6 +63,23 @@ def load_close_series(path):
     if close.empty:
         return None, last_date
     return close, last_date
+
+
+def load_stock_return_history(path):
+    if (not path) or (not os.path.exists(path)):
+        return [], []
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return [], []
+    if ("strategy_ret" not in df.columns) or ("benchmark_ret_alloc" not in df.columns):
+        return [], []
+    s = pd.to_numeric(df["strategy_ret"], errors="coerce").dropna().tolist()
+    b = pd.to_numeric(df["benchmark_ret_alloc"], errors="coerce").dropna().tolist()
+    n = min(len(s), len(b))
+    if n <= 0:
+        return [], []
+    return s[-n:], b[-n:]
 
 
 def targets_to_map(targets):
@@ -243,7 +262,9 @@ def apply_execution_guard(runtime, stock, out):
     guard_cfg = model_cfg.get("execution_guard", {})
     enabled = bool(guard_cfg.get("enabled", True))
     min_rebalance_days = int(guard_cfg.get("min_rebalance_days", model_cfg.get("rebalance_days", 20)))
-    min_turnover = float(guard_cfg.get("min_turnover", 0.05))
+    min_turnover_base = float(guard_cfg.get("min_turnover", 0.05))
+    alloc_effective = float(out.get("alloc_pct_effective", stock.get("capital_alloc_pct", 0.7)))
+    min_turnover, min_turnover_meta = resolve_min_turnover(min_turnover_base, alloc_effective, guard_cfg)
     force_on_regime_change = bool(guard_cfg.get("force_rebalance_on_regime_change", True))
 
     output_dir = runtime["paths"]["output_dir"]
@@ -300,7 +321,23 @@ def apply_execution_guard(runtime, stock, out):
         "action": action,
         "reason": reason,
         "min_rebalance_days": min_rebalance_days,
+        "min_turnover_base": round(min_turnover_base, 6),
         "min_turnover": round(min_turnover, 6),
+        "dynamic_min_turnover": {
+            "enabled": bool(min_turnover_meta.get("enabled", False)),
+            "alloc_pct": None
+            if min_turnover_meta.get("alloc_pct") is None
+            else round(float(min_turnover_meta["alloc_pct"]), 6),
+            "alloc_ref": None
+            if min_turnover_meta.get("alloc_ref") is None
+            else round(float(min_turnover_meta["alloc_ref"]), 6),
+            "ratio": None
+            if min_turnover_meta.get("ratio") is None
+            else round(float(min_turnover_meta["ratio"]), 6),
+            "multiplier": None
+            if min_turnover_meta.get("multiplier") is None
+            else round(float(min_turnover_meta["multiplier"]), 6),
+        },
         "force_rebalance_on_regime_change": force_on_regime_change,
         "days_since_last_rebalance": days_since,
         "proposed_turnover": round(turnover, 6),
@@ -402,7 +439,13 @@ def run_global_momentum(runtime, stock, risk):
         elif not eligible:
             signal_reason = "no_positive_momentum"
 
-    effective_alloc = alloc_pct
+    gate_cfg = model_cfg.get("exposure_gate", {})
+    history_file = gate_cfg.get(
+        "history_file",
+        os.path.join(runtime["paths"]["output_dir"], "reports", "stock_paper_forward_history.csv"),
+    )
+    hist_strategy_ret, hist_bench_alloc = load_stock_return_history(history_file)
+    effective_alloc, exposure_meta = evaluate_exposure_gate(hist_strategy_ret, hist_bench_alloc, alloc_pct, gate_cfg)
     stock_capital = total_capital * effective_alloc
     single_max = float(risk["position_limits"]["stock_single_max_pct"])
 
@@ -451,6 +494,7 @@ def run_global_momentum(runtime, stock, risk):
         "model": "dual_momentum_trend_ivol_defense",
         "capital": stock_capital,
         "alloc_pct_effective": round(effective_alloc, 4),
+        "alloc_pct_base": round(alloc_pct, 4),
         "benchmark_symbol": benchmark_symbol,
         "defensive_symbol": defensive_symbol,
         "regime_on": regime_on,
@@ -465,6 +509,7 @@ def run_global_momentum(runtime, stock, risk):
         },
         "scores": scores,
         "targets": targets,
+        "exposure_gate": exposure_meta,
         "note": "global momentum production targets",
     }
     out = apply_risk_overlay(runtime, stock, out)

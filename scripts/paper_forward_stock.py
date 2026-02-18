@@ -19,6 +19,8 @@ from core.exit_codes import (
     EXIT_OUTPUT_ERROR,
     EXIT_SIGNAL_ERROR,
 )
+from core.execution_guard import resolve_min_turnover
+from core.exposure_gate import evaluate_exposure_gate
 
 
 def load_yaml(path):
@@ -157,6 +159,7 @@ def build_signal(
 def run_paper_forward(runtime, stock, risk):
     model_cfg = stock.get("global_model", {})
     guard_cfg = model_cfg.get("execution_guard", {})
+    exposure_cfg = model_cfg.get("exposure_gate", {})
 
     benchmark_symbol = stock.get("benchmark_symbol", "510300")
     defensive_symbol = stock.get("defensive_symbol", "511010")
@@ -169,18 +172,19 @@ def run_paper_forward(runtime, stock, risk):
     ensure_dir(report_dir)
 
     prices = load_price_frame(data_dir, symbols)
+    warmup_min_days = int(model_cfg.get("warmup_min_days", 126))
     warmup = max(
         int(model_cfg.get("momentum_lb", 252)),
         int(model_cfg.get("ma_window", 200)),
         int(model_cfg.get("vol_window", 20)),
-        126,
+        warmup_min_days,
     ) + 1
     if warmup >= len(prices) - 1:
         raise RuntimeError("not enough history for paper-forward simulation")
 
     fee = float(model_cfg.get("fee", 0.0008))
     min_rebalance_days = int(guard_cfg.get("min_rebalance_days", model_cfg.get("rebalance_days", 20)))
-    min_turnover = float(guard_cfg.get("min_turnover", 0.05))
+    min_turnover_base = float(guard_cfg.get("min_turnover", 0.05))
     force_regime = bool(guard_cfg.get("force_rebalance_on_regime_change", True))
     guard_enabled = bool(guard_cfg.get("enabled", True))
 
@@ -197,16 +201,34 @@ def run_paper_forward(runtime, stock, risk):
     benchmark_peak_alloc = 1.0
 
     records = []
+    hist_strategy_ret = []
+    hist_benchmark_ret_alloc = []
+    exposure_stage_count = Counter()
+    min_turnover_meta = {"enabled": False, "base_min_turnover": min_turnover_base, "effective_min_turnover": min_turnover_base}
+    last_exposure_meta = {
+        "enabled": bool(exposure_cfg.get("enabled", False)),
+        "base_alloc_pct": alloc_pct,
+        "effective_alloc_pct": alloc_pct,
+        "stage": "disabled",
+        "reason": "init",
+    }
     for i in range(warmup, len(prices) - 1):
         date = prices.index[i]
         next_date = prices.index[i + 1]
+        alloc_effective, exposure_meta = evaluate_exposure_gate(
+            hist_strategy_ret,
+            hist_benchmark_ret_alloc,
+            alloc_pct,
+            exposure_cfg,
+        )
+        min_turnover, min_turnover_meta = resolve_min_turnover(min_turnover_base, alloc_effective, guard_cfg)
         proposed, regime_on, signal_reason, score_rows = build_signal(
             prices=prices,
             i=i,
             symbols=symbols,
             benchmark_symbol=benchmark_symbol,
             defensive_symbol=defensive_symbol,
-            alloc_pct=alloc_pct,
+            alloc_pct=alloc_effective,
             single_max=single_max,
             params=model_cfg,
         )
@@ -261,6 +283,12 @@ def run_paper_forward(runtime, stock, risk):
                 "next_date": next_date.date().isoformat(),
                 "action": action,
                 "action_reason": action_reason,
+                "alloc_pct_base": alloc_pct,
+                "alloc_pct_effective": float(alloc_effective),
+                "exposure_gate_stage": str(exposure_meta.get("stage", "unknown")),
+                "exposure_gate_reason": str(exposure_meta.get("reason", "")),
+                "exposure_gate_agg_excess_ann_worst": exposure_meta.get("agg_excess_ann_worst"),
+                "min_turnover_effective": float(min_turnover),
                 "regime_on": bool(regime_on),
                 "signal_reason": signal_reason,
                 "days_since_last_rebalance": days_since,
@@ -284,6 +312,10 @@ def run_paper_forward(runtime, stock, risk):
                 "scores": json.dumps(score_rows, ensure_ascii=False),
             }
         )
+        hist_strategy_ret.append(float(strategy_ret))
+        hist_benchmark_ret_alloc.append(float(benchmark_ret_alloc))
+        exposure_stage_count[str(exposure_meta.get("stage", "unknown"))] += 1
+        last_exposure_meta = exposure_meta
         weights = executed
         last_regime_on = regime_on
 
@@ -365,8 +397,16 @@ def run_paper_forward(runtime, stock, risk):
         "guard_params": {
             "enabled": guard_enabled,
             "min_rebalance_days": min_rebalance_days,
-            "min_turnover": min_turnover,
+            "min_turnover_base": min_turnover_base,
+            "min_turnover": float(last["min_turnover_effective"]),
+            "dynamic_min_turnover": min_turnover_meta,
             "force_rebalance_on_regime_change": force_regime,
+        },
+        "exposure_gate": {
+            "enabled": bool(exposure_cfg.get("enabled", False)),
+            "stage_count": dict(exposure_stage_count),
+            "latest": last_exposure_meta,
+            "params": exposure_cfg,
         },
     }
 
