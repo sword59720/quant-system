@@ -3,27 +3,27 @@ market: CN_STOCK
 mode: global_momentum
 backtest_mode: production  # production | research
 
-capital_alloc_pct: 0.70
+capital_alloc_pct: 1.00
 
 benchmark_symbol: "510300"
 defensive_symbol: "511010"
 
 global_model:
-  rebalance_days: 20
-  momentum_lb: 252
-  ma_window: 180
-  vol_window: 50
+  rebalance_days: 30
+  momentum_lb: 300
+  ma_window: 200
+  vol_window: 30
   warmup_min_days: 126
-  top_n: 4
+  top_n: 5
   fee: 0.0008
-  min_score: 0.0
+  min_score: 0.02
   defensive_bypass_single_max: true
   execution_guard:
     enabled: true
     min_rebalance_days: 30
-    min_turnover: 0.03
+    min_turnover: 0.05
     dynamic_min_turnover:
-      enabled: true
+      enabled: false
       alloc_ref: 0.70
       min_multiplier: 0.60
       max_multiplier: 1.40

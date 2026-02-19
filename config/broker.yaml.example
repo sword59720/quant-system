@@ -42,3 +42,19 @@ guotou:
     hosting_mode: "signal"   # signal | hosted
     use_alphat: false
     use_act: false
+
+# ============================================================
+# Crypto 交易所配置（CCXT）
+# ============================================================
+crypto:
+  name: "CryptoExchange"
+  # 与 config/crypto.yaml 的 exchange 对齐，如: htx / binance / okx
+  exchange: "htx"
+
+  # API 凭证
+  api_key: "YOUR_CRYPTO_API_KEY"
+  api_secret: "YOUR_CRYPTO_API_SECRET"
+  password: ""   # OKX 等交易所需要 passphrase
+
+  # 环境
+  sandbox: false

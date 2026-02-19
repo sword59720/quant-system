@@ -1,13 +1,44 @@
 enabled: true
-market: CRYPTO_SPOT
+market: CRYPTO_SWAP
 exchange: htx_direct
 mode: momentum_rotation_4h
 
 capital_alloc_pct: 0.30
 
+trade:
+  # spot | swap | future
+  market_type: swap
+  # cross | isolated (合约模式生效)
+  margin_mode: cross
+  # 合约杠杆 (合约模式生效)
+  leverage: 1
+  # oneway | hedge (合约模式生效)
+  position_mode: oneway
+  # 是否允许做空 (合约模式生效)
+  allow_short: true
+
 symbols:
   - "BTC/USDT"
   - "ETH/USDT"
+
+data_guard:
+  min_cache_rows: 200
+  max_cache_age_days: 5
+  # DNS 解析受限时：若失败都属于 DNS 且可用币种数达到阈值，则允许软降级继续
+  dns_block_soft_fail_enabled: true
+  dns_block_min_ready_symbols: 2
+
+network:
+  # auto: 优先沿用环境代理；若代理不可达自动切到直连重试
+  # env: 仅使用环境代理；direct: 仅直连（忽略 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY）
+  http_proxy_mode: auto
+  proxy_auto_bypass_on_error: true
+
+execution:
+  # 仅在 runtime.env=live 时生效：策略出目标后自动生成并执行下单
+  auto_place_order: true
+  # 过滤过小订单，避免因交易所最小下单限制导致拒单（单位: USDT）
+  min_order_notional: 0.01
 
 signal:
   timeframe: "4h"
@@ -15,8 +46,66 @@ signal:
   momentum_weights: [0.6, 0.4]
   rebalance_every_hours: 4
   top_n: 1
+  # risk_off 时是否切换为做空组合（仅合约 + allow_short=true 生效）
+  short_on_risk_off: false
+  # 做空组合数量（默认与 top_n 一致）
+  short_top_n: 1
 
 defense:
   use_usdt_defense: true
   risk_off_threshold_pct: -3.0
   stop_loss_pct: 4.0
+
+# 现货模型（覆盖 signal/defense 的部分参数）
+spot_model:
+  name: "spot_multifactor_v1"
+  signal:
+    top_n: 1
+    momentum_lookback_bars: [30, 90]
+    momentum_weights: [0.6, 0.4]
+    short_on_risk_off: false
+    short_top_n: 1
+  defense:
+    use_usdt_defense: true
+    risk_off_threshold_pct: -3.0
+
+# 合约模型（覆盖 signal/defense 的部分参数）
+contract_model:
+  name: "contract_rmm_v1"
+  signal:
+    engine: advanced_ls_rmm
+    top_n: 1
+    short_top_n: 2
+    momentum_lookback_bars: [90, 180]
+    momentum_weights: [1.0, 0.0]
+    ma_window_bars: 240
+    vol_window_bars: 40
+    momentum_threshold_pct: 1.0
+    rebalance_threshold: 0.01
+    max_exposure_pct: 1.00
+    short_on_risk_off: false
+    ls_long_alloc_pct: 0.20
+    ls_short_alloc_pct: 0.70
+    ls_short_requires_risk_off: false
+    ls_dynamic_budget_enabled: true
+    ls_regime_momentum_threshold_pct: 0.2
+    ls_regime_trend_breadth: 0.6
+    ls_regime_up_long_alloc_pct: 0.8
+    ls_regime_up_short_alloc_pct: 0.0
+    ls_regime_neutral_long_alloc_pct: 0.2
+    ls_regime_neutral_short_alloc_pct: 0.5
+    ls_regime_down_long_alloc_pct: 0.0
+    ls_regime_down_short_alloc_pct: 0.8
+    risk_managed:
+      enabled: true
+      target_vol_annual: 0.10
+      vol_lookback_bars: 60
+      min_leverage: 0.2
+      max_leverage: 2.5
+    drawdown_throttle:
+      enabled: true
+      trigger_dd: -0.04
+      reduced_alloc_multiplier: 0.15
+  defense:
+    use_usdt_defense: false
+    risk_off_threshold_pct: -1.0

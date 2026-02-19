@@ -31,6 +31,8 @@ if not skip_reports:
         [
             [py, "scripts/paper_forward_stock.py"],
             [py, "scripts/report_stock_weekly.py"],
+            [py, "scripts/report_execution_quality.py"],
+            [py, "scripts/notify_execution_quality_wecom.py"],
         ]
     )
 

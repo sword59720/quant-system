@@ -10,6 +10,7 @@ import secrets
 import requests
 import yaml
 from datetime import datetime
+from typing import Optional
 
 
 def _load_yaml(path):
@@ -36,7 +37,12 @@ def _save_dedup_state(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def send_wecom_message(content: str, title: str = "量化系统通知", dedup_key: str | None = None, dedup_hours: int = 0):
+def send_wecom_message(
+    content: str,
+    title: str = "量化系统通知",
+    dedup_key: Optional[str] = None,
+    dedup_hours: int = 0,
+):
     try:
         cfg = _load_yaml(os.path.join(_project_root(), "config", "notify.yaml"))
     except Exception as e:

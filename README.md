@@ -54,8 +54,19 @@ enabled: true
 ### 3.2 关键配置
 
 - `config/stock.yaml`：股票策略参数（ETF池、动量窗口、top_n）
-- `config/crypto.yaml`：币圈参数（当前 `exchange: htx_direct`）
+- `config/crypto.yaml`：币圈参数（现货/合约统一配置，当前默认 `exchange: htx_direct`）
 - `config/risk.yaml`：风控参数（仓位上限、回撤阈值等）
+
+`config/crypto.yaml` 新增自动下单开关（默认关闭）：
+
+```yaml
+execution:
+  auto_place_order: false
+  min_order_notional: 10
+```
+
+- `auto_place_order=true` 且 `config/runtime.yaml` 中 `env: live` 时，`scripts/run_crypto.py` 会在生成目标仓位后自动生成并执行 `crypto_trades.json`。
+- `min_order_notional` 用于过滤过小订单（单位 USDT）。
 
 ---
 
@@ -76,6 +87,8 @@ cd /home/haojc/.openclaw/workspace/quant-system
 ./.venv/bin/python scripts/fetch_crypto_data.py
 ./.venv/bin/python scripts/run_crypto.py
 ```
+
+> 当 `execution.auto_place_order=true` 且 `env=live` 时，`run_crypto.py` 会自动下单并同步持仓。
 
 ## 4.3 一键全流程
 
@@ -127,6 +140,8 @@ cd /home/haojc/.openclaw/workspace/quant-system
 
 - 股票目标仓位：`outputs/orders/stock_targets.json`
 - 币圈目标仓位：`outputs/orders/crypto_targets.json`
+- 币圈交易指令：`outputs/orders/crypto_trades.json`
+- 实盘执行回执：`outputs/orders/execution_record_*.json`
 - 巡检结果：`outputs/reports/healthcheck_latest.log`
 
 查看示例：
@@ -162,7 +177,16 @@ grep -E "Traceback|ERROR|failed" logs/cron_*.log | tail -n 50
 - 股票：ETF **多因子**（动量+低波动+回撤+流动性）综合打分，选 Top N（当前2个）
 - 股票风险开关：基准ETF（510300）若低于 MA120，则股票总仓位减半
 - 币圈：BTC/ETH **多因子**（动量+低波动+回撤）打分，选 Top N（当前1个）
-- 币圈防守：若短期收益都低于阈值（`risk_off_threshold_pct`），转入 USDT
+- 币圈模型分档：
+  - `spot_model`：用于现货模式（`trade.market_type=spot`）
+  - `contract_model`：用于合约模式（`trade.market_type=swap/future`）
+- 合约模型（`engine: advanced_rmm`）：
+  - 核心：趋势过滤（MA）+ 风险调整动量（momentum/vol）+ 目标波动动态杠杆 + 回撤节流
+  - 目标：在保持回撤可控的前提下提升年化收益
+- 币圈交易模式：
+  - `trade.market_type: spot`：现货交易，risk_off 可转 USDT
+  - `trade.market_type: swap/future`：合约交易，支持杠杆/保证金模式；risk_off 默认平仓到 0 仓
+  - 合约可选 `trade.allow_short=true` + `signal.short_on_risk_off=true`：risk_off 时切换做空组合
 - 仓位：按 `capital_alloc_pct` 与单标的上限分配
 
 > 注意：当前为 Paper 模式，输出的是目标仓位，不是实盘下单回执。

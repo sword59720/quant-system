@@ -98,6 +98,15 @@ def main():
         f"Step 4/4: 执行交易 ({'模拟' if args.dry_run else '实盘'})"
     ):
         return False
+
+    run_command(
+        [venv_python, "scripts/report_execution_quality.py"],
+        "附加步骤: 生成成交质量日报"
+    )
+    run_command(
+        [venv_python, "scripts/notify_execution_quality_wecom.py"],
+        "附加步骤: 成交质量阈值告警检查"
+    )
     
     print("\n" + "="*60)
     print("✨ 全部流程执行完毕")

@@ -23,12 +23,60 @@ def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
 
 
+def _append_order(orders, symbol: str, action: str, delta_weight: float, capital: float):
+    if abs(delta_weight) < 1e-6:
+        return
+    orders.append(
+        {
+            "symbol": symbol,
+            "action": action,
+            "delta_weight": round(float(delta_weight), 6),
+            "amount_quote": round(abs(float(delta_weight)) * capital, 2),
+        }
+    )
+
+
+def _build_crypto_contract_orders(symbol: str, cur_weight: float, tgt_weight: float, capital: float):
+    orders = []
+    cw = float(cur_weight)
+    tw = float(tgt_weight)
+
+    # 同号净仓：只需要增减同方向仓位
+    if cw >= 0 and tw >= 0:
+        diff = tw - cw
+        if diff > 0:
+            _append_order(orders, symbol, "OPEN_LONG", diff, capital)
+        else:
+            _append_order(orders, symbol, "CLOSE_LONG", diff, capital)
+        return orders
+    if cw <= 0 and tw <= 0:
+        curr_abs = abs(cw)
+        tgt_abs = abs(tw)
+        if tgt_abs > curr_abs:
+            _append_order(orders, symbol, "OPEN_SHORT", -(tgt_abs - curr_abs), capital)
+        else:
+            _append_order(orders, symbol, "CLOSE_SHORT", curr_abs - tgt_abs, capital)
+        return orders
+
+    # 跨零换向：先平后开
+    if cw > 0 and tw < 0:
+        _append_order(orders, symbol, "CLOSE_LONG", -cw, capital)
+        _append_order(orders, symbol, "OPEN_SHORT", tw, capital)
+        return orders
+    if cw < 0 and tw > 0:
+        _append_order(orders, symbol, "CLOSE_SHORT", abs(cw), capital)
+        _append_order(orders, symbol, "OPEN_LONG", tw, capital)
+        return orders
+    return orders
+
+
 def build_market_orders(market: str, target_file: str, pos_file: str, out_file: str, total_capital: float):
     target = load_json(target_file, default={})
     positions = load_json(pos_file, default={"positions": []})
 
     market_capital = float(target.get("capital", 0))
     capital = float(total_capital)
+    contract_mode = bool(target.get("contract_mode", False))
     tgt_items = target.get("targets", [])
     cur_items = positions.get("positions", [])
 
@@ -40,19 +88,15 @@ def build_market_orders(market: str, target_file: str, pos_file: str, out_file: 
     for s in symbols:
         tw = tgt.get(s, 0.0)
         cw = cur.get(s, 0.0)
-        diff = round(tw - cw, 6)
+        if market == "crypto" and contract_mode:
+            orders.extend(_build_crypto_contract_orders(s, cw, tw, capital))
+            continue
+
+        diff = tw - cw
         if abs(diff) < 1e-6:
             continue
         action = "BUY" if diff > 0 else "SELL"
-        amount = round(abs(diff) * capital, 2)
-        orders.append(
-            {
-                "symbol": s,
-                "action": action,
-                "delta_weight": diff,
-                "amount_quote": amount,
-            }
-        )
+        _append_order(orders, s, action, diff, capital)
 
     out = {
         "ts": datetime.now().isoformat(),

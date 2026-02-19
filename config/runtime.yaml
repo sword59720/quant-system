@@ -1,10 +1,22 @@
 enabled: true
-env: paper          # paper | live
+env: live          # paper | live
 timezone: Asia/Shanghai
 base_currency: CNY
-total_capital: 20000
+total_capital: 40
 
 paths:
   data_dir: ./data
   output_dir: ./outputs
   log_dir: ./logs
+
+execution_quality_alert:
+  enabled: true
+  report_file: ./outputs/reports/execution_quality_daily.json
+  min_orders: 1
+  dedup_hours: 12
+  thresholds:
+    success_rate_min: 0.95
+    fill_rate_min: 0.90
+    reject_rate_max: 0.05
+    p95_execution_latency_ms_max: 2000
+    p95_abs_slippage_bps_max: 20
