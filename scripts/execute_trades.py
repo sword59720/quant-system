@@ -18,21 +18,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # 导入适配器
 from adapters.guotou_trader import create_trader as create_guotou_trader, Order, OrderSide
 from adapters.myquant_trader import create_trader as create_myquant_trader
+from adapters.crypto_trader import create_trader as create_crypto_trader
 
 
-def create_trader_factory(config: dict):
+def create_trader_factory(config: dict, market: str = "stock"):
     """
-    根据配置创建对应的交易器实例
-    工厂函数根据 'broker' 字段分发
+    根据配置和市场类型创建对应的交易器实例
     """
+    if market == "crypto":
+        return create_crypto_trader(config)
+        
+    # Stock 市场逻辑
     broker = config.get("broker", "guotou")
     
-    # 根据 broker 类型选择适配器
     if broker == "myquant":
-        # 掘金量化适配器
         return create_myquant_trader(config)
     else:
-        # 默认国投证券适配器 (EMP/GRT)
         return create_guotou_trader(config)
 
 
@@ -60,7 +61,7 @@ def load_trades(file_path: str) -> dict:
         return json.load(f)
 
 
-def load_config() -> dict:
+def load_config(market: str = "stock") -> dict:
     """加载配置"""
     import yaml
     
@@ -81,8 +82,11 @@ def load_config() -> dict:
         with open(broker_file, 'r', encoding='utf-8') as f:
             broker_full_config = yaml.safe_load(f)
     
-    # 3. 提取对应券商的配置
-    if broker_type == "myquant":
+    # 3. 提取对应券商/市场的配置
+    if market == "crypto":
+        config = broker_full_config.get("crypto", {})
+        config["broker"] = "crypto"
+    elif broker_type == "myquant":
         config = broker_full_config.get("myquant", {})
         config["platform"] = "myquant"
     else:
@@ -93,7 +97,8 @@ def load_config() -> dict:
     # 4. 合并运行时参数
     config["env"] = env
     config["total_capital"] = total_capital
-    config["broker"] = broker_type
+    if market != "crypto":
+        config["broker"] = broker_type
     
     return config
 
@@ -104,8 +109,16 @@ def execute_trades(trades_file: str, dry_run: bool = False):
     """
     logger = setup_logging()
     
+    # 先加载交易指令，确定市场类型
+    if not os.path.exists(trades_file):
+        logger.error(f"❌ 交易指令文件不存在: {trades_file}")
+        return False
+        
+    trades = load_trades(trades_file)
+    market = trades.get("market", "stock").lower()
+    
     # 加载配置
-    config = load_config()
+    config = load_config(market=market)
     
     # dry_run 强制覆盖环境为 paper
     if dry_run:
@@ -117,11 +130,12 @@ def execute_trades(trades_file: str, dry_run: bool = False):
     logger.info(f"=" * 60)
     logger.info(f"开始执行交易")
     logger.info(f"环境: {env.upper()}")
-    logger.info(f"券商: {broker_name}")
+    logger.info(f"市场: {market.upper()}")
+    logger.info(f"券商/交易所: {broker_name}")
     logger.info(f"=" * 60)
     
-    # 实盘时间检查 (仅 live 模式)
-    if env == "live":
+    # 实盘时间检查 (仅 Stock Live 模式)
+    if env == "live" and market == "stock":
         now = datetime.now()
         current_time = now.time()
         is_trading_hours = (
@@ -135,10 +149,24 @@ def execute_trades(trades_file: str, dry_run: bool = False):
             logger.warning("⚠️ 当前不在A股交易时间内，实盘订单可能无法成交")
     
     # -------------------------------------------------
-    # 核心：创建交易器实例
+    # 核心：加载指令并创建交易器
     # -------------------------------------------------
+    if not os.path.exists(trades_file):
+        logger.error(f"❌ 交易指令文件不存在: {trades_file}")
+        return False
+        
+    trades = load_trades(trades_file)
+    market = trades.get("market", "stock").lower()
+    
+    # 根据市场类型加载不同配置
+    if market == "crypto":
+        import yaml
+        with open("./config/crypto.yaml", 'r', encoding='utf-8') as f:
+            crypto_config = yaml.safe_load(f)
+        config.update(crypto_config)
+    
     try:
-        trader = create_trader_factory(config)
+        trader = create_trader_factory(config, market=market)
     except Exception as e:
         logger.error(f"❌ 创建交易器失败: {e}")
         return False
@@ -149,12 +177,6 @@ def execute_trades(trades_file: str, dry_run: bool = False):
         return False
     
     try:
-        # 加载交易指令
-        if not os.path.exists(trades_file):
-            logger.error(f"❌ 交易指令文件不存在: {trades_file}")
-            return False
-        
-        trades = load_trades(trades_file)
         orders = trades.get("orders", [])
         
         if not orders:
