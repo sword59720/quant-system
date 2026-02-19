@@ -35,3 +35,4 @@ logs/
 *.log
 *.tmp
 *.swp
+config/broker.yaml
