@@ -99,15 +99,36 @@ cd /home/haojc/.openclaw/workspace/quant-system
 
 ---
 
-## 5. 自动运行（cron）
+## 5. 自动运行（cron，树莓派）
 
-当前已生效计划（practical mode）：
+统一模板位置：
+
+- `deploy/raspi/cron/quant-system.cron.tpl`
+
+推荐运行频率（Asia/Shanghai）：
 
 - 股票数据：工作日 16:05
-- 股票调仓信号：每周一 16:10
+- 股票信号：工作日 16:10
 - 币圈数据：每4小时第5分钟
 - 币圈信号：每4小时第7分钟
-- 健康检查：每天 13:10
+- 重型验证：每周六 17:30（`backtest_v3`）+ 17:50（`validate_stock_cpcv`）
+- 健康告警：每天 13:10
+
+安装到树莓派 crontab：
+
+```bash
+cd /home/pi/quant-system
+./scripts/install_raspi_cron.sh \
+  --target-root /home/pi/quant-system \
+  --python /home/pi/quant-system/.venv/bin/python \
+  --apply
+```
+
+仅渲染 cron 文件（不安装）：
+
+```bash
+./scripts/install_raspi_cron.sh --target-root /home/pi/quant-system
+```
 
 查看当前计划：
 
