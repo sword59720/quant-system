@@ -15,8 +15,8 @@ SHELL=/bin/bash
 10 16 * * 1-5 cd __ROOT__ && __PYTHON__ scripts/run_stock.py >> logs/cron_stock.log 2>&1
 
 # 2) Crypto cycle (every 4 hours)
-5 */4 * * * cd __ROOT__ && __PYTHON__ scripts/fetch_crypto_data.py >> logs/cron_crypto_fetch.log 2>&1
-7 */4 * * * cd __ROOT__ && __PYTHON__ scripts/run_crypto.py >> logs/cron_crypto.log 2>&1
+5 */4 * * * cd __ROOT__ && source ./setenv.sh && __PYTHON__ scripts/fetch_crypto_data.py >> logs/cron_crypto_fetch.log 2>&1
+7 */4 * * * cd __ROOT__ && source ./setenv.sh && __PYTHON__ scripts/run_crypto.py >> logs/cron_crypto.log 2>&1
 
 # 3) Heavy validation cycle (weekly)
 30 17 * * 6 cd __ROOT__ && __PYTHON__ scripts/backtest_v3.py >> logs/cron_backtest.log 2>&1

@@ -36,3 +36,4 @@ logs/
 *.tmp
 *.swp
 config/broker.yaml
+setenv.sh

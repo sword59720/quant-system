@@ -109,8 +109,8 @@ cd /home/haojc/.openclaw/workspace/quant-system
 
 - 股票数据：工作日 16:05
 - 股票信号：工作日 16:10
-- 币圈数据：每4小时第5分钟
-- 币圈信号：每4小时第7分钟
+- 币圈数据：每4小时第5分钟（执行前 `source setenv.sh`）
+- 币圈信号：每4小时第7分钟（执行前 `source setenv.sh`）
 - 重型验证：每周六 17:30（`backtest_v3`）+ 17:50（`validate_stock_cpcv`）
 - 健康告警：每天 13:10
 

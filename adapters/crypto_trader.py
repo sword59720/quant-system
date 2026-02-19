@@ -149,6 +149,51 @@ class CryptoLiveTrader(BaseTrader):
         self._derivative_ready_symbols: Set[str] = set()
 
     @staticmethod
+    def _first_non_empty(values: List[Optional[str]]) -> str:
+        for v in values:
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return ""
+
+    def _resolve_proxy_settings(self) -> Dict[str, str]:
+        """
+        为 CCXT 显式注入代理。
+        优先级：config.proxy/https_proxy/http_proxy > 环境变量。
+        """
+        cfg = self.config if isinstance(self.config, dict) else {}
+
+        # 支持在 broker.yaml -> crypto 下直接放 proxy 配置
+        proxy_any = self._first_non_empty([
+            cfg.get("proxy"),
+            cfg.get("all_proxy"),
+            cfg.get("ALL_PROXY"),
+            os.environ.get("ALL_PROXY"),
+            os.environ.get("all_proxy"),
+        ])
+        proxy_https = self._first_non_empty([
+            cfg.get("https_proxy"),
+            cfg.get("HTTPS_PROXY"),
+            os.environ.get("HTTPS_PROXY"),
+            os.environ.get("https_proxy"),
+            proxy_any,
+        ])
+        proxy_http = self._first_non_empty([
+            cfg.get("http_proxy"),
+            cfg.get("HTTP_PROXY"),
+            os.environ.get("HTTP_PROXY"),
+            os.environ.get("http_proxy"),
+            proxy_any,
+        ])
+
+        # CCXT 对部分交易所会拒绝同时设置 httpProxy + httpsProxy
+        # 因此只传一个：优先 https，其次 http
+        out: Dict[str, str] = {}
+        chosen = proxy_https or proxy_http
+        if chosen:
+            out["httpsProxy"] = chosen
+        return out
+
+    @staticmethod
     def _to_float(value: Any, default: float = 0.0) -> float:
         try:
             return float(value)
@@ -257,6 +302,7 @@ class CryptoLiveTrader(BaseTrader):
         if market.get("spot"):
             base_amount = notional_quote / price
             amount = self._to_float(self._ex.amount_to_precision(symbol, base_amount))
+            est_notional = amount * price
         elif market.get("contract") or market.get("swap") or market.get("future") or self.is_contract_market:
             # 合约数量通常按“张”提交，张数 = 标的数量 / contractSize
             contract_size = self._to_float(market.get("contractSize"), 1.0)
@@ -265,14 +311,32 @@ class CryptoLiveTrader(BaseTrader):
             base_amount = notional_quote / price
             contracts = base_amount / contract_size
             amount = self._to_float(self._ex.amount_to_precision(symbol, contracts))
+            est_notional = amount * contract_size * price
         else:
             base_amount = notional_quote / price
             amount = self._to_float(self._ex.amount_to_precision(symbol, base_amount))
+            est_notional = amount * price
 
         if amount <= 0:
             raise ValueError(
                 f"order amount rounded to 0 for {symbol}; notional={notional_quote}, price={price}"
             )
+
+        limits = market.get("limits") or {}
+        min_amount = self._to_float((limits.get("amount") or {}).get("min"), 0.0)
+        min_cost = self._to_float((limits.get("cost") or {}).get("min"), 0.0)
+
+        if min_amount > 0 and amount < min_amount:
+            raise ValueError(
+                f"order amount too small for {symbol}: amount={amount}, min_amount={min_amount}, "
+                f"notional={notional_quote:.4f}, est_notional={est_notional:.4f}"
+            )
+        if min_cost > 0 and est_notional < min_cost:
+            raise ValueError(
+                f"order notional too small for {symbol}: est_notional={est_notional:.4f}, min_cost={min_cost}, "
+                f"input_notional={notional_quote:.4f}"
+            )
+
         return amount
 
     @staticmethod
@@ -358,13 +422,21 @@ class CryptoLiveTrader(BaseTrader):
             options = {"defaultType": self.market_type}
             if self.is_contract_market:
                 options.setdefault("defaultSubType", "linear")
-            self._ex = exchange_class({
+            exchange_kwargs = {
                 'apiKey': self.api_key,
                 'secret': self.secret,
                 'password': self.password,
                 'enableRateLimit': True,
                 'options': options,
-            })
+            }
+            proxy_kwargs = self._resolve_proxy_settings()
+            if proxy_kwargs:
+                exchange_kwargs.update(proxy_kwargs)
+                self.logger.info(
+                    f"[Crypto LIVE] 使用代理: http={bool(proxy_kwargs.get('httpProxy'))} https={bool(proxy_kwargs.get('httpsProxy'))}"
+                )
+
+            self._ex = exchange_class(exchange_kwargs)
             
             if self.sandbox:
                 self._ex.set_sandbox_mode(True)
@@ -392,11 +464,11 @@ class CryptoLiveTrader(BaseTrader):
             total_usdt = self._to_float(balance.get("total", {}).get("USDT"))
             if total_usdt <= 0:
                 total_usdt = self._to_float(balance.get("USDT", {}).get("total"))
-            
+
             available = self._to_float(usdt.get("free"))
             if available <= 0:
                 available = self._to_float(balance.get("free", {}).get("USDT"))
-            
+
             return {
                 "account_id": self.api_key[:8] + "***",
                 "available_cash": available,
@@ -404,6 +476,31 @@ class CryptoLiveTrader(BaseTrader):
                 "market_type": self.market_type,
             }
         except Exception as e:
+            # HTX 统一账户兼容：某些 USDT-M 账户会在 fetch_balance 抛 4002
+            msg = str(e)
+            if (self.exchange_id == "htx") and ("err_code\":4002" in msg or "unified_account_info" in msg):
+                try:
+                    info = self._ex.contract_private_get_linear_swap_api_v3_unified_account_info({})
+                    data = (info or {}).get("data") or []
+                    usdt_row = None
+                    for row in data:
+                        if str(row.get("margin_account") or "").upper() == "USDT":
+                            usdt_row = row
+                            break
+                    if usdt_row is None and data:
+                        usdt_row = data[0]
+
+                    available = self._to_float((usdt_row or {}).get("margin_available"))
+                    total_asset = self._to_float((usdt_row or {}).get("margin_balance"))
+                    return {
+                        "account_id": self.api_key[:8] + "***",
+                        "available_cash": available,
+                        "total_asset": total_asset,
+                        "market_type": self.market_type,
+                    }
+                except Exception as e2:
+                    self.logger.error(f"[Crypto] 获取统一账户信息失败: {e2}")
+
             self.logger.error(f"[Crypto] 获取账户信息失败: {e}")
             return {"account_id": "ERROR", "available_cash": 0, "total_asset": 0}
     
