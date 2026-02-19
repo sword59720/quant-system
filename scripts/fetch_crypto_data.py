@@ -8,7 +8,7 @@ import yaml
 import requests
 import pandas as pd
 import ccxt
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Dict
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -27,6 +27,37 @@ def load_yaml(path):
 
 def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
+
+
+def resolve_timezone_name(x) -> str:
+    tz = str(x or "Asia/Shanghai").strip()
+    if not tz:
+        tz = "Asia/Shanghai"
+    try:
+        _ = pd.Timestamp.now(tz=tz)
+        return tz
+    except Exception:
+        return "Asia/Shanghai"
+
+
+def _epoch_to_local_naive(values, unit: str, timezone_name: str):
+    dt = pd.to_datetime(values, unit=unit, utc=True, errors="coerce")
+    try:
+        return dt.dt.tz_convert(timezone_name).dt.tz_localize(None)
+    except Exception:
+        if str(timezone_name).strip() == "Asia/Shanghai":
+            # Fallback for systems without timezone database (e.g. minimal Raspberry Pi image).
+            return (dt + pd.Timedelta(hours=8)).dt.tz_localize(None)
+        return dt.dt.tz_localize(None)
+
+
+def _now_date_in_timezone(timezone_name: str):
+    try:
+        return pd.Timestamp.now(tz=timezone_name).date()
+    except Exception:
+        if str(timezone_name).strip() == "Asia/Shanghai":
+            return (datetime.now(timezone.utc) + timedelta(hours=8)).date()
+        return datetime.now(timezone.utc).date()
 
 
 def to_htx_symbol(symbol: str) -> str:
@@ -100,6 +131,7 @@ def fetch_htx_klines(
     base_url: str = "https://api.huobi.pro/market/history/kline",
     proxy_mode: str = "auto",
     proxy_auto_bypass_on_error: bool = True,
+    timezone_name: str = "Asia/Shanghai",
 ) -> pd.DataFrame:
     period = "4hour" if timeframe == "4h" else "60min"
     params = {"symbol": to_htx_symbol(symbol), "period": period, "size": size}
@@ -119,24 +151,30 @@ def fetch_htx_klines(
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(df["id"], unit="s")
+    df["date"] = _epoch_to_local_naive(df["id"], unit="s", timezone_name=timezone_name)
     out = df[["date", "open", "high", "low", "close", "amount"]].copy()
     out = out.rename(columns={"amount": "volume"})
     out = out.sort_values("date").reset_index(drop=True)
     return out
 
 
-def fetch_ccxt_klines(ex, symbol: str, timeframe: str, limit: int = 500) -> pd.DataFrame:
+def fetch_ccxt_klines(
+    ex,
+    symbol: str,
+    timeframe: str,
+    limit: int = 500,
+    timezone_name: str = "Asia/Shanghai",
+) -> pd.DataFrame:
     ohlcv = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
     if not ohlcv:
         return pd.DataFrame()
     df = pd.DataFrame(ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
-    df["date"] = pd.to_datetime(df["ts"], unit="ms")
+    df["date"] = _epoch_to_local_naive(df["ts"], unit="ms", timezone_name=timezone_name)
     df = df[["date", "open", "high", "low", "close", "volume"]]
     return df
 
 
-def has_valid_cache(path: str, min_rows: int = 200, max_age_days: int = 5) -> bool:
+def has_valid_cache(path: str, min_rows: int = 200, max_age_days: int = 5, now_date=None) -> bool:
     if not os.path.exists(path):
         return False
     try:
@@ -150,7 +188,8 @@ def has_valid_cache(path: str, min_rows: int = 200, max_age_days: int = 5) -> bo
     dates = pd.to_datetime(df["date"], errors="coerce").dropna()
     if dates.empty:
         return False
-    age_days = (datetime.now().date() - dates.iloc[-1].date()).days
+    current_date = now_date if now_date is not None else datetime.now().date()
+    age_days = (current_date - dates.iloc[-1].date()).days
     return age_days <= max_age_days
 
 
@@ -171,11 +210,11 @@ def is_dns_resolution_error(exc: Exception) -> bool:
     return any(k in msg for k in keywords)
 
 
-def list_ready_symbols(data_dir: str, symbols: list, min_rows: int, max_age_days: int) -> list:
+def list_ready_symbols(data_dir: str, symbols: list, min_rows: int, max_age_days: int, now_date=None) -> list:
     ready = []
     for s in symbols:
         out = os.path.join(data_dir, f"{s.replace('/', '_')}.csv")
-        if has_valid_cache(out, min_rows=min_rows, max_age_days=max_age_days):
+        if has_valid_cache(out, min_rows=min_rows, max_age_days=max_age_days, now_date=now_date):
             ready.append(s)
     return ready
 
@@ -219,6 +258,10 @@ def main():
     if not runtime.get("enabled", True):
         print("[system] disabled by config/runtime.yaml: enabled=false")
         return EXIT_DISABLED
+
+    timezone_name = resolve_timezone_name(runtime.get("timezone", "Asia/Shanghai"))
+    now_date = _now_date_in_timezone(timezone_name)
+    print(f"[crypto-data] timezone={timezone_name} (csv date stored as local clock)")
 
     exchange_name = crypto.get("exchange", "okx")
     timeframe = crypto.get("signal", {}).get("timeframe", "4h")
@@ -265,6 +308,7 @@ def main():
                                 base_url=base_url,
                                 proxy_mode=proxy_mode,
                                 proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
+                                timezone_name=timezone_name,
                             )
                             if not df.empty:
                                 break
@@ -276,7 +320,13 @@ def main():
 
                 if df.empty and fallback_ex is not None:
                     try:
-                        df = fetch_ccxt_klines(fallback_ex, s, timeframe=timeframe, limit=1000)
+                        df = fetch_ccxt_klines(
+                            fallback_ex,
+                            s,
+                            timeframe=timeframe,
+                            limit=1000,
+                            timezone_name=timezone_name,
+                        )
                     except Exception as e:
                         last_err = e
 
@@ -287,7 +337,7 @@ def main():
                 print(f"[crypto-data:htx] {s} -> {out} rows={len(df)}")
                 ok += 1
             except Exception as e:
-                if has_valid_cache(out, min_rows=min_rows, max_age_days=max_age_days):
+                if has_valid_cache(out, min_rows=min_rows, max_age_days=max_age_days, now_date=now_date):
                     print(f"[crypto-data:htx] {s} fetch failed, keep cache -> {out} ({e})")
                     ok += 1
                 else:
@@ -299,7 +349,13 @@ def main():
         print(f"[crypto-data] done ok={ok} fail={fail} @ {datetime.now().isoformat()}")
         if fail == 0:
             return EXIT_OK
-        ready_symbols = list_ready_symbols(data_dir, symbols, min_rows=min_rows, max_age_days=max_age_days)
+        ready_symbols = list_ready_symbols(
+            data_dir,
+            symbols,
+            min_rows=min_rows,
+            max_age_days=max_age_days,
+            now_date=now_date,
+        )
         if should_soft_fail_on_dns(
             total_fail=fail,
             dns_fail=dns_fail,
@@ -322,10 +378,16 @@ def main():
         missing = []
         for s in symbols:
             out = os.path.join(data_dir, f"{s.replace('/', '_')}.csv")
-            if not has_valid_cache(out, min_rows=min_rows, max_age_days=max_age_days):
+            if not has_valid_cache(out, min_rows=min_rows, max_age_days=max_age_days, now_date=now_date):
                 missing.append(s)
         if missing:
-            ready_symbols = list_ready_symbols(data_dir, symbols, min_rows=min_rows, max_age_days=max_age_days)
+            ready_symbols = list_ready_symbols(
+                data_dir,
+                symbols,
+                min_rows=min_rows,
+                max_age_days=max_age_days,
+                now_date=now_date,
+            )
             all_dns = bool(exchange_errors) and all(
                 is_dns_resolution_error(err) for err in exchange_errors.values()
             )
@@ -350,14 +412,14 @@ def main():
     for s in symbols:
         out = os.path.join(data_dir, f"{s.replace('/', '_')}.csv")
         try:
-            df = fetch_ccxt_klines(ex, s, timeframe=timeframe, limit=500)
+            df = fetch_ccxt_klines(ex, s, timeframe=timeframe, limit=500, timezone_name=timezone_name)
             if df.empty:
                 raise RuntimeError("empty data")
             df.to_csv(out, index=False, encoding="utf-8")
             print(f"[crypto-data:{exchange_name}] {s} -> {out} rows={len(df)}")
             ok += 1
         except Exception as e:
-            if has_valid_cache(out, min_rows=min_rows, max_age_days=max_age_days):
+            if has_valid_cache(out, min_rows=min_rows, max_age_days=max_age_days, now_date=now_date):
                 print(f"[crypto-data:{exchange_name}] {s} fetch failed, keep cache -> {out} ({e})")
                 ok += 1
             else:
@@ -369,7 +431,13 @@ def main():
     print(f"[crypto-data] done ok={ok} fail={fail} @ {datetime.now().isoformat()}")
     if fail == 0:
         return EXIT_OK
-    ready_symbols = list_ready_symbols(data_dir, symbols, min_rows=min_rows, max_age_days=max_age_days)
+    ready_symbols = list_ready_symbols(
+        data_dir,
+        symbols,
+        min_rows=min_rows,
+        max_age_days=max_age_days,
+        now_date=now_date,
+    )
     if should_soft_fail_on_dns(
         total_fail=fail,
         dns_fail=dns_fail,

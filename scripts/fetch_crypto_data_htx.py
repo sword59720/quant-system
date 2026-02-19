@@ -18,6 +18,27 @@ def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
 
 
+def resolve_timezone_name(x) -> str:
+    tz = str(x or "Asia/Shanghai").strip()
+    if not tz:
+        tz = "Asia/Shanghai"
+    try:
+        _ = pd.Timestamp.now(tz=tz)
+        return tz
+    except Exception:
+        return "Asia/Shanghai"
+
+
+def _epoch_to_local_naive(values, unit: str, timezone_name: str):
+    dt = pd.to_datetime(values, unit=unit, utc=True, errors="coerce")
+    try:
+        return dt.dt.tz_convert(timezone_name).dt.tz_localize(None)
+    except Exception:
+        if str(timezone_name).strip() == "Asia/Shanghai":
+            return (dt + pd.Timedelta(hours=8)).dt.tz_localize(None)
+        return dt.dt.tz_localize(None)
+
+
 def to_htx_symbol(symbol: str) -> str:
     # BTC/USDT -> btcusdt
     return symbol.replace("/", "").lower()
@@ -89,6 +110,7 @@ def fetch_kline(
     timeout: int = 10,
     proxy_mode: str = "auto",
     proxy_auto_bypass_on_error: bool = True,
+    timezone_name: str = "Asia/Shanghai",
 ):
     url = "https://api.huobi.pro/market/history/kline"
     params = {"symbol": to_htx_symbol(symbol), "period": period, "size": size}
@@ -110,7 +132,7 @@ def fetch_kline(
     # huobi returns latest first
     df = pd.DataFrame(rows)
     # expected cols: id, open, close, low, high, amount, vol, count
-    df["date"] = pd.to_datetime(df["id"], unit="s")
+    df["date"] = _epoch_to_local_naive(df["id"], unit="s", timezone_name=timezone_name)
     out = df[["date", "open", "high", "low", "close", "amount"]].copy()
     out = out.rename(columns={"amount": "volume"})
     out = out.sort_values("date").reset_index(drop=True)
@@ -120,6 +142,8 @@ def fetch_kline(
 def main():
     runtime = load_yaml("config/runtime.yaml")
     crypto = load_yaml("config/crypto.yaml")
+    timezone_name = resolve_timezone_name(runtime.get("timezone", "Asia/Shanghai"))
+    print(f"[htx-data] timezone={timezone_name} (csv date stored as local clock)")
     network_cfg = crypto.get("network", {}) or {}
     proxy_mode = str(network_cfg.get("http_proxy_mode", "auto")).strip().lower()
     if proxy_mode not in {"auto", "env", "direct"}:
@@ -145,6 +169,7 @@ def main():
                 timeout=10,
                 proxy_mode=proxy_mode,
                 proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
+                timezone_name=timezone_name,
             )
             if df.empty:
                 raise RuntimeError("empty data")

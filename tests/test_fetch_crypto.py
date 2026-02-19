@@ -8,6 +8,7 @@ from unittest import mock
 import pandas as pd
 
 from scripts.fetch_crypto_data import (
+    fetch_ccxt_klines,
     fetch_htx_klines,
     has_valid_cache,
     http_get_with_proxy_policy,
@@ -41,6 +42,42 @@ class TestFetchCrypto(unittest.TestCase):
         self.assertEqual(len(df), 2)
         self.assertTrue(df["date"].iloc[0] < df["date"].iloc[1])
         self.assertAlmostEqual(float(df["volume"].iloc[0]), 10.0)
+
+    @mock.patch("scripts.fetch_crypto_data.requests.get")
+    def test_fetch_htx_klines_uses_runtime_timezone(self, mock_get):
+        mock_resp = mock.Mock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {
+            "status": "ok",
+            "data": [
+                {"id": 1700003600, "open": 2, "high": 3, "low": 1, "close": 2.5, "amount": 20},
+                {"id": 1700000000, "open": 1, "high": 2, "low": 0.5, "close": 1.5, "amount": 10},
+            ],
+        }
+        mock_get.return_value = mock_resp
+
+        df = fetch_htx_klines("BTC/USDT", timeframe="4h", size=2, timezone_name="Asia/Shanghai")
+        expected_first = (
+            pd.to_datetime(1700000000, unit="s", utc=True)
+            .tz_convert("Asia/Shanghai")
+            .tz_localize(None)
+        )
+        self.assertEqual(df["date"].iloc[0], expected_first)
+
+    def test_fetch_ccxt_klines_uses_runtime_timezone(self):
+        ex = mock.Mock()
+        ex.fetch_ohlcv.return_value = [
+            [1700000000000, 1, 2, 0.5, 1.5, 10],
+            [1700003600000, 2, 3, 1.0, 2.5, 20],
+        ]
+        df = fetch_ccxt_klines(ex, "BTC/USDT", timeframe="4h", limit=2, timezone_name="Asia/Shanghai")
+        self.assertEqual(len(df), 2)
+        expected_last = (
+            pd.to_datetime(1700003600000, unit="ms", utc=True)
+            .tz_convert("Asia/Shanghai")
+            .tz_localize(None)
+        )
+        self.assertEqual(df["date"].iloc[1], expected_last)
 
     def test_has_valid_cache(self):
         with tempfile.TemporaryDirectory() as tmpdir:
