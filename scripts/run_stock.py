@@ -5,6 +5,8 @@ import os
 import sys
 import yaml
 import json
+import hashlib
+import subprocess
 import pandas as pd
 from datetime import datetime
 
@@ -81,6 +83,427 @@ def load_stock_return_history(path):
     if n <= 0:
         return [], []
     return s[-n:], b[-n:]
+
+
+def _safe_float(x, default=None):
+    try:
+        if x is None:
+            return default
+        return float(x)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_symbols(symbols):
+    out = []
+    seen = set()
+    for s in symbols or []:
+        x = str(s or "").strip()
+        if not x or x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return sorted(out)
+
+
+def _build_universe_symbols(stock):
+    universe = _normalize_symbols(stock.get("universe", []))
+    benchmark = str(stock.get("benchmark_symbol", "510300")).strip()
+    defensive = str(stock.get("defensive_symbol", "511010")).strip()
+    return _normalize_symbols(universe + [benchmark, defensive])
+
+
+def _hash_symbols(symbols):
+    payload = ",".join(_normalize_symbols(symbols))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def classify_universe_change_level(has_previous, change_count, change_ratio, small_thr, medium_thr):
+    if not has_previous:
+        return "init"
+    if int(change_count) <= 0:
+        return "none"
+    if float(change_ratio) <= float(small_thr):
+        return "small"
+    if float(change_ratio) <= float(medium_thr):
+        return "medium"
+    return "large"
+
+
+def run_universe_quick_check(runtime, symbols, min_history_rows):
+    data_dir = os.path.join(runtime["paths"]["data_dir"], "stock")
+    checks = []
+    missing_symbols = []
+    invalid_symbols = []
+    insufficient_symbols = []
+    ready_symbols = []
+    last_dates = []
+
+    for symbol in _normalize_symbols(symbols):
+        fp = os.path.join(data_dir, f"{symbol}.csv")
+        item = {
+            "symbol": symbol,
+            "file": fp,
+            "exists": os.path.exists(fp),
+            "has_columns": False,
+            "rows": 0,
+            "last_date": None,
+            "ready": False,
+        }
+        if not item["exists"]:
+            missing_symbols.append(symbol)
+            checks.append(item)
+            continue
+
+        try:
+            df = pd.read_csv(fp)
+        except Exception:
+            invalid_symbols.append(symbol)
+            checks.append(item)
+            continue
+
+        if ("date" not in df.columns) or ("close" not in df.columns):
+            invalid_symbols.append(symbol)
+            checks.append(item)
+            continue
+
+        close = pd.to_numeric(df["close"], errors="coerce").dropna()
+        dates = pd.to_datetime(df["date"], errors="coerce").dropna()
+        item["has_columns"] = True
+        item["rows"] = int(len(close))
+        if not dates.empty:
+            item["last_date"] = dates.iloc[-1].date().isoformat()
+            last_dates.append(item["last_date"])
+        item["ready"] = bool(len(close) >= int(min_history_rows))
+
+        if item["ready"]:
+            ready_symbols.append(symbol)
+        else:
+            insufficient_symbols.append(symbol)
+        checks.append(item)
+
+    total = int(len(checks))
+    ready_count = int(len(ready_symbols))
+    ready_ratio = float(ready_count / total) if total else 0.0
+
+    common_last_date = None
+    if checks:
+        valid_dates = [x["last_date"] for x in checks if x.get("last_date")]
+        if valid_dates:
+            common_last_date = min(valid_dates)
+
+    return {
+        "total_symbols": total,
+        "ready_symbols": ready_count,
+        "ready_ratio": ready_ratio,
+        "min_history_rows": int(min_history_rows),
+        "missing_symbols": sorted(missing_symbols),
+        "invalid_symbols": sorted(invalid_symbols),
+        "insufficient_symbols": sorted(insufficient_symbols),
+        "common_last_date": common_last_date,
+        "checks": checks,
+    }
+
+
+def _load_backtest_baseline(path):
+    data = load_json(path, default={})
+    if not isinstance(data, dict):
+        return None
+    stock_block = data.get("stock", {})
+    if not isinstance(stock_block, dict):
+        return None
+    keys = ["annual_return", "max_drawdown", "sharpe", "final_nav", "periods"]
+    if any(k not in stock_block for k in keys):
+        return None
+    return {k: stock_block.get(k) for k in keys}
+
+
+def evaluate_backtest_gate(current, baseline, gate_cfg):
+    out = {
+        "required": True,
+        "available": False,
+        "passed": True,
+        "reason": "ok",
+        "baseline": baseline,
+        "current": current,
+        "thresholds": {
+            "annual_return_drop_max": float(gate_cfg.get("annual_return_drop_max", 0.02)),
+            "sharpe_drop_max": float(gate_cfg.get("sharpe_drop_max", 0.20)),
+            "max_drawdown_widen_max": float(gate_cfg.get("max_drawdown_widen_max", 0.03)),
+        },
+        "checks": {},
+        "deltas": {},
+    }
+
+    if not isinstance(current, dict) or ("error" in current):
+        out["passed"] = False
+        out["reason"] = f"backtest_unavailable: {current.get('error') if isinstance(current, dict) else 'invalid'}"
+        return out
+
+    if baseline is None:
+        out["available"] = True
+        out["passed"] = True
+        out["reason"] = "baseline_missing"
+        return out
+
+    cur_ann = _safe_float(current.get("annual_return"))
+    cur_sharpe = _safe_float(current.get("sharpe"))
+    cur_mdd = _safe_float(current.get("max_drawdown"))
+    base_ann = _safe_float(baseline.get("annual_return"))
+    base_sharpe = _safe_float(baseline.get("sharpe"))
+    base_mdd = _safe_float(baseline.get("max_drawdown"))
+    if None in [cur_ann, cur_sharpe, cur_mdd, base_ann, base_sharpe, base_mdd]:
+        out["passed"] = False
+        out["reason"] = "metric_missing"
+        return out
+
+    ann_drop = float(base_ann - cur_ann)
+    sharpe_drop = float(base_sharpe - cur_sharpe)
+    mdd_widen = float(abs(cur_mdd) - abs(base_mdd))
+    thr = out["thresholds"]
+    checks = {
+        "annual_return_drop_ok": ann_drop <= float(thr["annual_return_drop_max"]),
+        "sharpe_drop_ok": sharpe_drop <= float(thr["sharpe_drop_max"]),
+        "max_drawdown_widen_ok": mdd_widen <= float(thr["max_drawdown_widen_max"]),
+    }
+    out["checks"] = checks
+    out["deltas"] = {
+        "annual_return": float(cur_ann - base_ann),
+        "sharpe": float(cur_sharpe - base_sharpe),
+        "max_drawdown": float(cur_mdd - base_mdd),
+        "max_drawdown_widen": mdd_widen,
+    }
+    out["available"] = True
+    out["passed"] = bool(all(checks.values()))
+    if not out["passed"]:
+        out["reason"] = "gate_failed"
+    return out
+
+
+def run_cpcv_gate(runtime):
+    report_file = os.path.join(runtime["paths"]["output_dir"], "reports", "stock_cpcv_report.json")
+    cmd = [sys.executable, "scripts/validate_stock_cpcv.py"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except Exception as e:
+        return {
+            "required": True,
+            "available": False,
+            "passed": False,
+            "reason": f"cpcv_run_failed: {e}",
+            "returncode": None,
+            "windows": {},
+        }
+
+    if proc.returncode == EXIT_DISABLED:
+        return {
+            "required": True,
+            "available": False,
+            "passed": False,
+            "reason": "cpcv_disabled",
+            "returncode": int(proc.returncode),
+            "windows": {},
+        }
+
+    report = load_json(report_file, default={})
+    windows = {}
+    all_pass = True
+    if isinstance(report, dict):
+        for name, data in (report.get("windows", {}) or {}).items():
+            if (not isinstance(data, dict)) or ("summary" not in data):
+                windows[name] = False
+                all_pass = False
+                continue
+            passed = bool((data.get("summary") or {}).get("gate_passed", False))
+            windows[name] = passed
+            all_pass = all_pass and passed
+    else:
+        all_pass = False
+
+    if not windows:
+        all_pass = False
+
+    reason = "ok" if all_pass else "gate_failed"
+    if proc.returncode != EXIT_OK:
+        reason = f"cpcv_script_exit_{proc.returncode}"
+        all_pass = False
+
+    return {
+        "required": True,
+        "available": bool(windows),
+        "passed": bool(all_pass),
+        "reason": reason,
+        "returncode": int(proc.returncode),
+        "windows": windows,
+    }
+
+
+def apply_universe_change_guard(runtime, stock, risk):
+    val_cfg = stock.get("validation", {}) or {}
+    guard_cfg = val_cfg.get("universe_change_guard", {}) or {}
+    enabled = bool(guard_cfg.get("enabled", False))
+    output_dir = runtime["paths"]["output_dir"]
+
+    state_file = guard_cfg.get(
+        "state_file",
+        os.path.join(output_dir, "state", "stock_universe_state.json"),
+    )
+    report_file = guard_cfg.get(
+        "report_file",
+        os.path.join(output_dir, "reports", "stock_universe_change_latest.json"),
+    )
+    ensure_dir(os.path.dirname(state_file))
+    ensure_dir(os.path.dirname(report_file))
+
+    symbols = _build_universe_symbols(stock)
+    current_hash = _hash_symbols(symbols)
+    now_ts = datetime.now().isoformat()
+
+    if not enabled:
+        out = {
+            "enabled": False,
+            "level": "disabled",
+            "alert_required": False,
+            "report_file": report_file,
+            "state_file": state_file,
+        }
+        save_json(report_file, {"ts": now_ts, **out})
+        save_json(
+            state_file,
+            {
+                "ts": now_ts,
+                "enabled": False,
+                "symbols": symbols,
+                "symbols_hash": current_hash,
+                "last_level": "disabled",
+            },
+        )
+        return out
+
+    state = load_json(state_file, default={})
+    prev_symbols = state.get("symbols")
+    if not isinstance(prev_symbols, list):
+        prev_symbols = None
+    else:
+        prev_symbols = _normalize_symbols(prev_symbols)
+
+    prev_set = set(prev_symbols or [])
+    cur_set = set(symbols)
+    added = sorted(cur_set - prev_set)
+    removed = sorted(prev_set - cur_set)
+    change_count = int(len(added) + len(removed))
+    base_count = int(len(prev_symbols) if prev_symbols is not None else len(symbols))
+    change_ratio = float(change_count / max(1, base_count))
+
+    small_thr = float(guard_cfg.get("small_change_ratio", 0.10))
+    medium_thr = float(guard_cfg.get("medium_change_ratio", 0.30))
+    if medium_thr < small_thr:
+        medium_thr = small_thr
+    level = classify_universe_change_level(
+        has_previous=(prev_symbols is not None),
+        change_count=change_count,
+        change_ratio=change_ratio,
+        small_thr=small_thr,
+        medium_thr=medium_thr,
+    )
+
+    model_cfg = stock.get("global_model", {}) or {}
+    min_rows_default = max(
+        int(model_cfg.get("momentum_lb", 252)),
+        int(model_cfg.get("ma_window", 200)),
+        int(model_cfg.get("vol_window", 30)),
+        int(model_cfg.get("warmup_min_days", 126)),
+    ) + 2
+    min_rows = int(guard_cfg.get("min_history_rows", min_rows_default))
+    min_ready_ratio = float(guard_cfg.get("min_ready_ratio", 0.90))
+
+    quick = run_universe_quick_check(runtime, symbols, min_rows)
+    checks = {"quick_check": quick}
+    issues = []
+    if quick.get("missing_symbols"):
+        issues.append("missing_data_files")
+    if quick.get("invalid_symbols"):
+        issues.append("invalid_data_format")
+    if float(quick.get("ready_ratio", 0.0)) < min_ready_ratio:
+        issues.append("insufficient_history_coverage")
+
+    backtest_gate_cfg = guard_cfg.get("backtest_gate", {}) or {}
+    run_backtest = bool(guard_cfg.get("run_backtest_on_medium_large", True))
+    if level in {"medium", "large"} and run_backtest:
+        baseline_file = backtest_gate_cfg.get(
+            "baseline_file",
+            os.path.join(output_dir, "reports", "backtest_report.json"),
+        )
+        baseline = _load_backtest_baseline(baseline_file)
+        bt_current = {"error": "not_run"}
+        try:
+            from scripts.backtest_v3 import backtest_stock
+
+            bt_current = backtest_stock(runtime, stock, risk, backtest_mode_override="production")
+        except Exception as e:
+            bt_current = {"error": str(e)}
+
+        bt_gate = evaluate_backtest_gate(bt_current, baseline, backtest_gate_cfg)
+        bt_gate["baseline_file"] = baseline_file
+        checks["backtest_gate"] = bt_gate
+        if not bool(bt_gate.get("passed", False)):
+            issues.append("backtest_gate_failed")
+
+    run_cpcv = bool(guard_cfg.get("run_cpcv_on_large", True))
+    if level == "large" and run_cpcv:
+        cpcv = run_cpcv_gate(runtime)
+        checks["cpcv_gate"] = cpcv
+        if not bool(cpcv.get("passed", False)):
+            issues.append("cpcv_gate_failed")
+
+    status = "pass"
+    if issues:
+        status = "warn"
+    if ("backtest_gate_failed" in issues) or ("cpcv_gate_failed" in issues):
+        status = "risk"
+
+    report = {
+        "ts": now_ts,
+        "enabled": True,
+        "level": level,
+        "status": status,
+        "universe_size": int(len(symbols)),
+        "change_count": change_count,
+        "change_ratio": round(change_ratio, 6),
+        "thresholds": {
+            "small_change_ratio": small_thr,
+            "medium_change_ratio": medium_thr,
+            "min_history_rows": min_rows,
+            "min_ready_ratio": min_ready_ratio,
+        },
+        "changes": {
+            "added": added,
+            "removed": removed,
+        },
+        "issues": sorted(set(issues)),
+        "checks": checks,
+        "alert_required": bool(issues and level not in {"none", "init"}),
+        "symbols_hash": current_hash,
+        "state_file": state_file,
+        "report_file": report_file,
+    }
+    save_json(report_file, report)
+    save_json(
+        state_file,
+        {
+            "ts": now_ts,
+            "enabled": True,
+            "symbols": symbols,
+            "symbols_hash": current_hash,
+            "last_level": level,
+            "last_status": status,
+            "last_change_count": change_count,
+            "last_change_ratio": round(change_ratio, 6),
+            "last_issues": sorted(set(issues)),
+            "last_report_file": report_file,
+        },
+    )
+    return report
 
 
 def targets_to_map(targets):
@@ -643,6 +1066,19 @@ def main():
         return EXIT_SIGNAL_ERROR
 
     try:
+        universe_guard = apply_universe_change_guard(runtime, stock, risk)
+        out["universe_change_guard"] = universe_guard
+    except Exception as e:
+        out["universe_change_guard"] = {
+            "enabled": False,
+            "level": "error",
+            "status": "warn",
+            "issues": [f"guard_failed:{e}"],
+            "alert_required": False,
+        }
+        print(f"[stock] universe guard warning: {e}")
+
+    try:
         output_dir = runtime["paths"]["output_dir"]
         ensure_dir(output_dir)
         ensure_dir(os.path.join(output_dir, "orders"))
@@ -685,6 +1121,31 @@ def main():
                 "风控处罚触发：" + ", ".join(reason) + f"\n当前目标仓位: {tgt}",
                 title="风控状态异常触发",
                 dedup_key="risk_stock_trigger",
+                dedup_hours=24,
+            )
+
+        # 股票池变化分级告警
+        u_guard = out.get("universe_change_guard", {}) or {}
+        if bool(u_guard.get("alert_required", False)):
+            level = str(u_guard.get("level", "unknown"))
+            status = str(u_guard.get("status", "warn"))
+            issues = ", ".join(u_guard.get("issues", [])) or "none"
+            changes = u_guard.get("changes", {}) or {}
+            added = ",".join(changes.get("added", [])) or "无"
+            removed = ",".join(changes.get("removed", [])) or "无"
+            lines = [
+                f"时间: {out.get('ts','')}",
+                f"等级: {level}",
+                f"状态: {status}",
+                f"变更: +[{added}] -[{removed}]",
+                f"问题: {issues}",
+            ]
+            symbols_hash = str(u_guard.get("symbols_hash", ""))[:16]
+            dedup_key = f"stock_universe_guard_{symbols_hash}" if symbols_hash else "stock_universe_guard"
+            send_wecom_message(
+                "\n".join(lines),
+                title="股票池变更告警",
+                dedup_key=dedup_key,
                 dedup_hours=24,
             )
     except Exception as e:
