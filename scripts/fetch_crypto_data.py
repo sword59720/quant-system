@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import argparse
 import os
 import sys
 import time
@@ -9,7 +10,7 @@ import requests
 import pandas as pd
 import ccxt
 from datetime import datetime, timedelta, timezone
-from typing import Dict
+from typing import Dict, Optional
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from core.exit_codes import (
@@ -62,6 +63,17 @@ def _now_date_in_timezone(timezone_name: str):
 
 def to_htx_symbol(symbol: str) -> str:
     return symbol.replace("/", "").lower()
+
+
+def to_okx_inst_id(symbol: str) -> str:
+    # BTC/USDT -> BTC-USDT
+    return symbol.replace("/", "-").upper()
+
+
+def to_okx_bar(timeframe: str) -> str:
+    tf = str(timeframe or "").strip().lower()
+    mapping = {"1h": "1H", "4h": "4H", "1d": "1D"}
+    return mapping.get(tf, "4H")
 
 
 def _error_chain_message(exc: Exception) -> str:
@@ -158,6 +170,240 @@ def fetch_htx_klines(
     return out
 
 
+def parse_start_ts_seconds(start_str: str):
+    if not start_str:
+        return None
+    ts = pd.Timestamp(start_str)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return int(ts.timestamp())
+
+
+def fetch_htx_klines_page_with_id(
+    symbol: str,
+    timeframe: str = "4h",
+    size: int = 2000,
+    timeout: int = 10,
+    base_url: str = "https://api.huobi.pro/market/history/kline",
+    proxy_mode: str = "auto",
+    proxy_auto_bypass_on_error: bool = True,
+    timezone_name: str = "Asia/Shanghai",
+    to_ts: int = None,
+) -> pd.DataFrame:
+    period = "4hour" if timeframe == "4h" else "60min"
+    params = {"symbol": to_htx_symbol(symbol), "period": period, "size": int(size)}
+    if to_ts is not None:
+        params["to"] = int(to_ts)
+
+    r = http_get_with_proxy_policy(
+        base_url,
+        params=params,
+        timeout=timeout,
+        proxy_mode=proxy_mode,
+        proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
+    )
+    r.raise_for_status()
+    data = r.json()
+    if data.get("status") != "ok":
+        raise RuntimeError(f"htx error: {data}")
+    rows = data.get("data", [])
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df["id"] = pd.to_numeric(df["id"], errors="coerce")
+    df = df.dropna(subset=["id"]).copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    df["id"] = df["id"].astype("int64")
+    df["date"] = _epoch_to_local_naive(df["id"], unit="s", timezone_name=timezone_name)
+    out = df[["id", "date", "open", "high", "low", "close", "amount"]].copy()
+    out = out.rename(columns={"amount": "volume"})
+    out = out.sort_values("id").drop_duplicates(subset=["id"], keep="last").reset_index(drop=True)
+    return out
+
+
+def fetch_htx_klines_history(
+    symbol: str,
+    timeframe: str = "4h",
+    start_ts_seconds: int = None,
+    max_bars: int = 2000,
+    page_size: int = 2000,
+    timeout: int = 10,
+    base_url: str = "https://api.huobi.pro/market/history/kline",
+    proxy_mode: str = "auto",
+    proxy_auto_bypass_on_error: bool = True,
+    timezone_name: str = "Asia/Shanghai",
+) -> pd.DataFrame:
+    if max_bars <= 0:
+        return pd.DataFrame()
+
+    all_pages = []
+    seen_ids = set()
+    prev_oldest = None
+    cursor_to = None
+    page_size = max(50, min(2000, int(page_size)))
+
+    while len(seen_ids) < max_bars:
+        page = fetch_htx_klines_page_with_id(
+            symbol=symbol,
+            timeframe=timeframe,
+            size=page_size,
+            timeout=timeout,
+            base_url=base_url,
+            proxy_mode=proxy_mode,
+            proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
+            timezone_name=timezone_name,
+            to_ts=cursor_to,
+        )
+        if page.empty:
+            break
+
+        if seen_ids:
+            page = page[~page["id"].isin(seen_ids)].copy()
+            if page.empty:
+                break
+
+        ids = page["id"].astype("int64").tolist()
+        seen_ids.update(ids)
+        all_pages.append(page)
+
+        oldest = int(min(ids))
+        if (start_ts_seconds is not None) and (oldest <= int(start_ts_seconds)):
+            break
+        if (prev_oldest is not None) and (oldest >= prev_oldest):
+            break
+        prev_oldest = oldest
+        cursor_to = oldest - 1
+        time.sleep(0.1)
+
+    if not all_pages:
+        return pd.DataFrame()
+
+    out = (
+        pd.concat(all_pages, ignore_index=True)
+        .sort_values("id")
+        .drop_duplicates(subset=["id"], keep="last")
+        .reset_index(drop=True)
+    )
+    if start_ts_seconds is not None:
+        out = out[out["id"] >= int(start_ts_seconds)].copy()
+    if len(out) > max_bars:
+        out = out.tail(max_bars).copy()
+    out = out[["date", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+    return out
+
+
+def fetch_okx_klines_history(
+    symbol: str,
+    timeframe: str = "4h",
+    start_ts_seconds: Optional[int] = None,
+    max_bars: int = 20000,
+    page_size: int = 100,
+    timeout: int = 10,
+    base_url: str = "https://www.okx.com/api/v5/market/history-candles",
+    proxy_mode: str = "auto",
+    proxy_auto_bypass_on_error: bool = True,
+    timezone_name: str = "Asia/Shanghai",
+    max_retries: int = 3,
+) -> pd.DataFrame:
+    if max_bars <= 0:
+        return pd.DataFrame()
+
+    all_pages = []
+    seen_ts = set()
+    prev_oldest = None
+    cursor_after = None
+    page_size = max(10, min(100, int(page_size)))
+    start_ts_ms = int(start_ts_seconds) * 1000 if start_ts_seconds is not None else None
+
+    while len(seen_ts) < max_bars:
+        req_limit = min(page_size, max_bars - len(seen_ts))
+        params = {
+            "instId": to_okx_inst_id(symbol),
+            "bar": to_okx_bar(timeframe),
+            "limit": str(req_limit),
+        }
+        if cursor_after is not None:
+            params["after"] = str(int(cursor_after))
+
+        rows = None
+        last_err = None
+        for i in range(max(1, int(max_retries))):
+            try:
+                r = http_get_with_proxy_policy(
+                    base_url,
+                    params=params,
+                    timeout=timeout,
+                    proxy_mode=proxy_mode,
+                    proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
+                )
+                r.raise_for_status()
+                data = r.json()
+                if str(data.get("code")) != "0":
+                    raise RuntimeError(f"okx error: code={data.get('code')} msg={data.get('msg')}")
+                rows = data.get("data", [])
+                break
+            except Exception as e:
+                last_err = e
+                time.sleep(0.3 * (i + 1))
+        if rows is None:
+            raise RuntimeError(last_err or "okx history request failed")
+        if not rows:
+            break
+
+        page = pd.DataFrame(rows)
+        page = page.rename(columns={0: "ts", 1: "open", 2: "high", 3: "low", 4: "close", 5: "volume"})
+        page["ts"] = pd.to_numeric(page["ts"], errors="coerce")
+        page = page.dropna(subset=["ts"]).copy()
+        if page.empty:
+            break
+        page["ts"] = page["ts"].astype("int64")
+        for c in ["open", "high", "low", "close", "volume"]:
+            page[c] = pd.to_numeric(page[c], errors="coerce")
+        page = page.dropna(subset=["open", "high", "low", "close", "volume"]).copy()
+        if page.empty:
+            break
+
+        if seen_ts:
+            page = page[~page["ts"].isin(seen_ts)].copy()
+            if page.empty:
+                break
+
+        bars = page["ts"].astype("int64").tolist()
+        seen_ts.update(bars)
+        all_pages.append(page[["ts", "open", "high", "low", "close", "volume"]].copy())
+
+        oldest = int(min(bars))
+        if (start_ts_ms is not None) and (oldest <= start_ts_ms):
+            break
+        if (prev_oldest is not None) and (oldest >= prev_oldest):
+            break
+        prev_oldest = oldest
+        cursor_after = oldest
+        time.sleep(0.08)
+
+    if not all_pages:
+        return pd.DataFrame()
+
+    out = (
+        pd.concat(all_pages, ignore_index=True)
+        .sort_values("ts")
+        .drop_duplicates(subset=["ts"], keep="last")
+        .reset_index(drop=True)
+    )
+    if start_ts_ms is not None:
+        out = out[out["ts"] >= int(start_ts_ms)].copy()
+    if len(out) > max_bars:
+        out = out.tail(max_bars).copy()
+    out["date"] = _epoch_to_local_naive(out["ts"], unit="ms", timezone_name=timezone_name)
+    out = out[["date", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+    return out
+
+
 def fetch_ccxt_klines(
     ex,
     symbol: str,
@@ -172,6 +418,57 @@ def fetch_ccxt_klines(
     df["date"] = _epoch_to_local_naive(df["ts"], unit="ms", timezone_name=timezone_name)
     df = df[["date", "open", "high", "low", "close", "volume"]]
     return df
+
+
+def fetch_ccxt_klines_history(
+    ex,
+    symbol: str,
+    timeframe: str,
+    start_ts_ms: int,
+    max_bars: int = 20000,
+    limit: int = 1000,
+    timezone_name: str = "Asia/Shanghai",
+) -> pd.DataFrame:
+    all_rows = []
+    seen_ts = set()
+    since = int(start_ts_ms)
+    limit = max(50, min(1000, int(limit)))
+    max_bars = max(200, int(max_bars))
+    prev_last_ts = None
+
+    while len(seen_ts) < max_bars:
+        batch_limit = min(limit, max_bars - len(seen_ts))
+        ohlcv = ex.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=batch_limit)
+        if not ohlcv:
+            break
+
+        appended = 0
+        for row in ohlcv:
+            ts = int(row[0])
+            if ts not in seen_ts:
+                seen_ts.add(ts)
+                all_rows.append(row)
+                appended += 1
+
+        last_ts = int(ohlcv[-1][0])
+        if (prev_last_ts is not None) and (last_ts <= prev_last_ts):
+            break
+        prev_last_ts = last_ts
+        since = last_ts + 1
+
+        if len(ohlcv) < batch_limit:
+            break
+        time.sleep(max(0.05, float(getattr(ex, "rateLimit", 200)) / 1000.0))
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_rows, columns=["ts", "open", "high", "low", "close", "volume"])
+    df = df.sort_values("ts").drop_duplicates(subset=["ts"], keep="last").reset_index(drop=True)
+    if len(df) > max_bars:
+        df = df.tail(max_bars).copy()
+    df["date"] = _epoch_to_local_naive(df["ts"], unit="ms", timezone_name=timezone_name)
+    return df[["date", "open", "high", "low", "close", "volume"]]
 
 
 def has_valid_cache(path: str, min_rows: int = 200, max_age_days: int = 5, now_date=None) -> bool:
@@ -248,6 +545,27 @@ def load_ccxt_exchange(candidates: list):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Fetch crypto data from HTX/ccxt")
+    parser.add_argument(
+        "--history-start",
+        type=str,
+        default=None,
+        help="history start date, e.g. 2020-01-01 (UTC)",
+    )
+    parser.add_argument(
+        "--max-bars",
+        type=int,
+        default=2000,
+        help="max bars per symbol to keep (default 2000)",
+    )
+    parser.add_argument(
+        "--page-size",
+        type=int,
+        default=2000,
+        help="HTX page size per request, max 2000",
+    )
+    args = parser.parse_args()
+
     try:
         runtime = load_yaml("config/runtime.yaml")
         crypto = load_yaml("config/crypto.yaml")
@@ -284,6 +602,14 @@ def main():
     if proxy_mode not in {"auto", "env", "direct"}:
         proxy_mode = "auto"
     proxy_auto_bypass_on_error = bool(network_cfg.get("proxy_auto_bypass_on_error", True))
+    max_bars = max(200, int(args.max_bars))
+    page_size = max(50, min(2000, int(args.page_size)))
+    history_start_ts = parse_start_ts_seconds(args.history_start)
+    if args.history_start:
+        print(
+            f"[crypto-data] history mode enabled: start={args.history_start} "
+            f"max_bars={max_bars} page_size={page_size}"
+        )
 
     # HTX direct mode (bypass ccxt load_markets issue)
     if exchange_name in ["htx", "huobi", "htx_direct"]:
@@ -291,7 +617,18 @@ def main():
             "https://api.huobi.pro/market/history/kline",
             "https://api-aws.huobi.pro/market/history/kline",
         ]
-        _, fallback_ex, _ = load_ccxt_exchange(["okx", "bybit"])
+        okx_history_url = "https://www.okx.com/api/v5/market/history-candles"
+        fallback_name, fallback_ex = None, None
+        fallback_loaded = False
+
+        def ensure_fallback_exchange():
+            nonlocal fallback_name, fallback_ex, fallback_loaded
+            if fallback_loaded:
+                return fallback_name, fallback_ex
+            fallback_loaded = True
+            fallback_name, fallback_ex, _ = load_ccxt_exchange(["okx", "bybit"])
+            return fallback_name, fallback_ex
+
         for s in symbols:
             out = os.path.join(data_dir, f"{s.replace('/', '_')}.csv")
             last_err = None
@@ -300,16 +637,30 @@ def main():
                 for base_url in htx_urls:
                     for timeout in [8, 12, 20]:
                         try:
-                            df = fetch_htx_klines(
-                                s,
-                                timeframe=timeframe,
-                                size=2000,
-                                timeout=timeout,
-                                base_url=base_url,
-                                proxy_mode=proxy_mode,
-                                proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
-                                timezone_name=timezone_name,
-                            )
+                            if history_start_ts is not None:
+                                df = fetch_htx_klines_history(
+                                    s,
+                                    timeframe=timeframe,
+                                    start_ts_seconds=history_start_ts,
+                                    max_bars=max_bars,
+                                    page_size=page_size,
+                                    timeout=timeout,
+                                    base_url=base_url,
+                                    proxy_mode=proxy_mode,
+                                    proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
+                                    timezone_name=timezone_name,
+                                )
+                            else:
+                                df = fetch_htx_klines(
+                                    s,
+                                    timeframe=timeframe,
+                                    size=max_bars,
+                                    timeout=timeout,
+                                    base_url=base_url,
+                                    proxy_mode=proxy_mode,
+                                    proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
+                                    timezone_name=timezone_name,
+                                )
                             if not df.empty:
                                 break
                         except Exception as e:
@@ -318,13 +669,68 @@ def main():
                     if not df.empty:
                         break
 
-                if df.empty and fallback_ex is not None:
+                # In history mode, use OKX direct API fallback for multi-year data
+                # when HTX endpoint returns only recent capped bars.
+                if history_start_ts is not None:
                     try:
-                        df = fetch_ccxt_klines(
-                            fallback_ex,
+                        okx_df = fetch_okx_klines_history(
                             s,
                             timeframe=timeframe,
-                            limit=1000,
+                            start_ts_seconds=history_start_ts,
+                            max_bars=max_bars,
+                            page_size=min(100, page_size),
+                            timeout=12,
+                            base_url=okx_history_url,
+                            proxy_mode=proxy_mode,
+                            proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
+                            timezone_name=timezone_name,
+                            max_retries=3,
+                        )
+                        if (not okx_df.empty) and (len(okx_df) > len(df)):
+                            df = okx_df
+                            print(
+                                "[crypto-data:history-fallback:okx_direct] "
+                                f"{s} rows={len(df)}"
+                            )
+                    except Exception as e:
+                        last_err = e
+
+                # HTX direct endpoint is typically capped around recent 2000 bars.
+                # We already have OKX direct history fallback above.
+                # Keep ccxt fallback as the last resort to avoid slow load_markets in normal path.
+                if (history_start_ts is not None) and df.empty:
+                    fallback_name_tmp, fallback_ex_tmp = ensure_fallback_exchange()
+                    if fallback_ex_tmp is not None:
+                        try:
+                            alt_df = fetch_ccxt_klines_history(
+                                fallback_ex_tmp,
+                                s,
+                                timeframe=timeframe,
+                                start_ts_ms=int(history_start_ts) * 1000,
+                                max_bars=max_bars,
+                                limit=1000,
+                                timezone_name=timezone_name,
+                            )
+                            if (not alt_df.empty) and (len(alt_df) > len(df)):
+                                df = alt_df
+                                print(
+                                    f"[crypto-data:history-fallback:{fallback_name_tmp}] "
+                                    f"{s} rows={len(df)}"
+                                )
+                        except Exception as e:
+                            last_err = e
+
+                if df.empty:
+                    _, fallback_ex_tmp = ensure_fallback_exchange()
+                else:
+                    fallback_ex_tmp = None
+                if df.empty and fallback_ex_tmp is not None:
+                    try:
+                        df = fetch_ccxt_klines(
+                            fallback_ex_tmp,
+                            s,
+                            timeframe=timeframe,
+                            limit=min(1000, max_bars),
                             timezone_name=timezone_name,
                         )
                     except Exception as e:
@@ -412,7 +818,24 @@ def main():
     for s in symbols:
         out = os.path.join(data_dir, f"{s.replace('/', '_')}.csv")
         try:
-            df = fetch_ccxt_klines(ex, s, timeframe=timeframe, limit=500, timezone_name=timezone_name)
+            if history_start_ts is not None:
+                df = fetch_ccxt_klines_history(
+                    ex,
+                    s,
+                    timeframe=timeframe,
+                    start_ts_ms=int(history_start_ts) * 1000,
+                    max_bars=max_bars,
+                    limit=1000,
+                    timezone_name=timezone_name,
+                )
+            else:
+                df = fetch_ccxt_klines(
+                    ex,
+                    s,
+                    timeframe=timeframe,
+                    limit=min(500, max_bars),
+                    timezone_name=timezone_name,
+                )
             if df.empty:
                 raise RuntimeError("empty data")
             df.to_csv(out, index=False, encoding="utf-8")
