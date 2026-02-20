@@ -20,6 +20,12 @@ trade:
 symbols:
   - "BTC/USDT"
   - "ETH/USDT"
+  - "SOL/USDT"
+  - "XRP/USDT"
+  - "ADA/USDT"
+  - "DOGE/USDT"
+  - "LINK/USDT"
+  - "LTC/USDT"
 
 data_guard:
   min_cache_rows: 200
@@ -71,41 +77,45 @@ spot_model:
 
 # 合约模型（覆盖 signal/defense 的部分参数）
 contract_model:
-  name: "contract_rmm_v1"
+  name: "contract_recent_target_confidence_v4_o20_sharpe1"
   signal:
-    engine: advanced_ls_rmm
-    top_n: 1
-    short_top_n: 2
-    momentum_lookback_bars: [90, 180]
-    momentum_weights: [1.0, 0.0]
-    ma_window_bars: 240
-    vol_window_bars: 40
-    momentum_threshold_pct: 1.0
+    engine: advanced_ls_cs
+    top_n: 2
+    short_top_n: 3
+    momentum_lookback_bars: [60, 120]
+    momentum_weights: [0.8, 0.2]
+    ma_window_bars: 180
+    vol_window_bars: 30
+    momentum_threshold_pct: 0.0
     rebalance_threshold: 0.01
-    max_exposure_pct: 1.00
+    max_exposure_pct: 0.80
     short_on_risk_off: false
-    ls_long_alloc_pct: 0.20
-    ls_short_alloc_pct: 0.70
-    ls_short_requires_risk_off: false
+    ls_long_alloc_pct: 0.50
+    ls_short_alloc_pct: 0.05
+    ls_short_requires_risk_off: true
     ls_dynamic_budget_enabled: true
-    ls_regime_momentum_threshold_pct: 0.2
-    ls_regime_trend_breadth: 0.6
-    ls_regime_up_long_alloc_pct: 0.8
+    ls_regime_momentum_threshold_pct: 0.8
+    ls_regime_trend_breadth: 0.7
+    ls_regime_up_long_alloc_pct: 1.0
     ls_regime_up_short_alloc_pct: 0.0
-    ls_regime_neutral_long_alloc_pct: 0.2
-    ls_regime_neutral_short_alloc_pct: 0.5
-    ls_regime_down_long_alloc_pct: 0.0
+    ls_regime_neutral_long_alloc_pct: 0.3
+    ls_regime_neutral_short_alloc_pct: 0.05
+    ls_neutral_exposure_multiplier: 1.0
+    ls_regime_down_long_alloc_pct: 0.1
     ls_regime_down_short_alloc_pct: 0.8
+    ls_confidence_scaling_enabled: true
+    ls_confidence_min_spread: 0.1
+    ls_confidence_full_spread: 0.28
     risk_managed:
       enabled: true
-      target_vol_annual: 0.10
+      target_vol_annual: 0.14
       vol_lookback_bars: 60
       min_leverage: 0.2
-      max_leverage: 2.5
+      max_leverage: 1.0
     drawdown_throttle:
       enabled: true
-      trigger_dd: -0.04
-      reduced_alloc_multiplier: 0.15
+      trigger_dd: -0.08
+      reduced_alloc_multiplier: 0.05
   defense:
     use_usdt_defense: false
-    risk_off_threshold_pct: -1.0
+    risk_off_threshold_pct: -2.0

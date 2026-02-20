@@ -17,6 +17,7 @@ from core.exit_codes import EXIT_CONFIG_ERROR, EXIT_OK, EXIT_OUTPUT_ERROR, EXIT_
 from core.crypto_model import resolve_crypto_model_cfg
 from core.signal import momentum_score, volatility_score, max_drawdown_score, liquidity_score, normalize_rank
 from scripts.paper_forward_stock import run_paper_forward
+from scripts.validate_crypto_contract import run_contract_backtest
 
 
 def load_yaml(path):
@@ -381,11 +382,31 @@ def backtest_crypto(runtime, crypto_cfg):
     market_type = model_meta["market_type"]
     contract_mode = model_meta["contract_mode"]
     engine = str(signal_cfg.get("engine", "multifactor_v1")).strip().lower()
+    if contract_mode and engine in {"advanced_rmm", "advanced_ls_rmm", "advanced_ls_cs"}:
+        res = run_contract_backtest(runtime, crypto_cfg)
+        if "error" in res:
+            return res
+        res.update(
+            {
+                "model_profile": model_meta["profile_key"],
+                "model_name": model_meta["profile_name"],
+                "market_type": market_type,
+                "contract_mode": contract_mode,
+                "engine": engine,
+                "allow_short": bool((crypto_cfg.get("trade", {}) or {}).get("allow_short", False)),
+                "short_on_risk_off": bool(signal_cfg.get("short_on_risk_off", False)),
+                "ls_dynamic_budget_enabled": bool(signal_cfg.get("ls_dynamic_budget_enabled", False)),
+                "ls_long_alloc_pct": float(signal_cfg.get("ls_long_alloc_pct", crypto_cfg.get("capital_alloc_pct", 0.3))),
+                "ls_short_alloc_pct": float(signal_cfg.get("ls_short_alloc_pct", crypto_cfg.get("capital_alloc_pct", 0.3))),
+                "ls_short_requires_risk_off": bool(signal_cfg.get("ls_short_requires_risk_off", False)),
+            }
+        )
+        return res
 
     top_n = signal_cfg.get("top_n", 1)
     short_top_n = int(signal_cfg.get("short_top_n", top_n))
     short_on_risk_off = bool(signal_cfg.get("short_on_risk_off", False))
-    is_advanced_engine = engine in {"advanced_rmm", "advanced_ls_rmm"}
+    is_advanced_engine = engine in {"advanced_rmm", "advanced_ls_rmm", "advanced_ls_cs"}
     lbs = signal_cfg.get("momentum_lookback_bars", [30, 90])
     ws = signal_cfg.get("momentum_weights", [0.6, 0.4])
     fw = signal_cfg.get("factor_weights", {"momentum": 0.60, "low_vol": 0.25, "drawdown": 0.15})
@@ -414,8 +435,17 @@ def backtest_crypto(runtime, crypto_cfg):
     ls_regime_neutral_short_alloc_pct = float(
         signal_cfg.get("ls_regime_neutral_short_alloc_pct", ls_short_alloc_pct)
     )
+    ls_neutral_exposure_multiplier = float(signal_cfg.get("ls_neutral_exposure_multiplier", 1.0))
     ls_regime_down_long_alloc_pct = float(signal_cfg.get("ls_regime_down_long_alloc_pct", ls_long_alloc_pct))
     ls_regime_down_short_alloc_pct = float(signal_cfg.get("ls_regime_down_short_alloc_pct", ls_short_alloc_pct))
+    ls_confidence_scaling_enabled = bool(signal_cfg.get("ls_confidence_scaling_enabled", False))
+    ls_confidence_min_spread = float(signal_cfg.get("ls_confidence_min_spread", 0.12))
+    ls_confidence_full_spread = float(
+        signal_cfg.get(
+            "ls_confidence_full_spread",
+            max(ls_confidence_min_spread + 1e-6, 0.32),
+        )
+    )
     ppy = int(signal_cfg.get("periods_per_year", 6 * 365))
 
     frames = {}
@@ -450,6 +480,10 @@ def backtest_crypto(runtime, crypto_cfg):
     rm_cfg = signal_cfg.get("risk_managed", {}) or {}
     rm_enabled = bool(rm_cfg.get("enabled", False))
     rm_target_vol = float(rm_cfg.get("target_vol_annual", 0.0))
+    rm_regime_target_vol_enabled = bool(rm_cfg.get("regime_target_vol_enabled", False))
+    rm_target_vol_up = float(rm_cfg.get("target_vol_up_annual", rm_target_vol))
+    rm_target_vol_neutral = float(rm_cfg.get("target_vol_neutral_annual", rm_target_vol))
+    rm_target_vol_down = float(rm_cfg.get("target_vol_down_annual", rm_target_vol))
     rm_vol_lb = int(rm_cfg.get("vol_lookback_bars", vol_window))
     rm_lev_min = float(rm_cfg.get("min_leverage", 0.2))
     rm_lev_max = float(rm_cfg.get("max_leverage", max(1.0, float(trade_cfg.get("leverage", 1.0)))))
@@ -500,12 +534,24 @@ def backtest_crypto(runtime, crypto_cfg):
                 score = {s: raw[s]["momentum"] / max(raw[s]["vol_ann"], 1e-8) for s in raw.keys()}
                 ranked_desc = [x[0] for x in sorted(score.items(), key=lambda x: x[1], reverse=True)]
                 ranked_asc = [x[0] for x in sorted(score.items(), key=lambda x: x[1])]
-                long_candidates = [
-                    s for s in ranked_desc if raw[s]["trend_on"] and raw[s]["momentum"] > momentum_threshold
-                ][: max(1, int(top_n))]
-                short_candidates = [
-                    s for s in ranked_asc if (not raw[s]["trend_on"]) and raw[s]["momentum"] < -momentum_threshold
-                ][: max(1, int(short_top_n))]
+                if engine == "advanced_ls_cs":
+                    long_candidates = [
+                        s for s in ranked_desc if raw[s]["momentum"] > momentum_threshold
+                    ][: max(1, int(top_n))]
+                    short_candidates = [
+                        s for s in ranked_asc if raw[s]["momentum"] < -momentum_threshold
+                    ][: max(1, int(short_top_n))]
+                    if not long_candidates:
+                        long_candidates = ranked_desc[: max(1, int(top_n))]
+                    if not short_candidates:
+                        short_candidates = ranked_asc[: max(1, int(short_top_n))]
+                else:
+                    long_candidates = [
+                        s for s in ranked_desc if raw[s]["trend_on"] and raw[s]["momentum"] > momentum_threshold
+                    ][: max(1, int(top_n))]
+                    short_candidates = [
+                        s for s in ranked_asc if (not raw[s]["trend_on"]) and raw[s]["momentum"] < -momentum_threshold
+                    ][: max(1, int(short_top_n))]
 
                 target_map = {}
                 risk_off = all(v["short_ret"] < threshold for v in raw.values())
@@ -517,7 +563,7 @@ def backtest_crypto(runtime, crypto_cfg):
                     regime_state = "risk_off"
                 elif (avg_momentum >= ls_regime_momentum_threshold) and (trend_breadth >= ls_regime_trend_breadth):
                     regime_state = "risk_on"
-                if engine == "advanced_ls_rmm":
+                if engine in {"advanced_ls_rmm", "advanced_ls_cs"}:
                     long_budget = max(0.0, ls_long_alloc_pct)
                     short_budget = max(0.0, ls_short_alloc_pct)
                     if ls_dynamic_budget_enabled:
@@ -530,6 +576,9 @@ def backtest_crypto(runtime, crypto_cfg):
                         else:
                             long_budget = max(0.0, ls_regime_neutral_long_alloc_pct)
                             short_budget = max(0.0, ls_regime_neutral_short_alloc_pct)
+                            neutral_mult = max(0.0, min(1.5, ls_neutral_exposure_multiplier))
+                            long_budget *= neutral_mult
+                            short_budget *= neutral_mult
                     if long_candidates and long_budget > 0:
                         inv_vol = {s: 1.0 / max(raw[s]["vol_ann"], 1e-8) for s in long_candidates}
                         inv_sum = sum(inv_vol.values())
@@ -551,6 +600,16 @@ def backtest_crypto(runtime, crypto_cfg):
                         if inv_sum > 0:
                             for s in short_candidates:
                                 target_map[s] = target_map.get(s, 0.0) - min(short_budget * (inv_vol[s] / inv_sum), single_cap)
+                    if ls_confidence_scaling_enabled and target_map:
+                        spread = float(max(score.values()) - min(score.values())) if score else 0.0
+                        hi = max(ls_confidence_full_spread, ls_confidence_min_spread + 1e-8)
+                        if spread <= ls_confidence_min_spread:
+                            confidence = 0.0
+                        elif spread >= hi:
+                            confidence = 1.0
+                        else:
+                            confidence = (spread - ls_confidence_min_spread) / (hi - ls_confidence_min_spread)
+                        target_map = {s: w * confidence for s, w in target_map.items()}
                 else:
                     if not risk_off and long_candidates:
                         inv_vol = {s: 1.0 / max(raw[s]["vol_ann"], 1e-8) for s in long_candidates}
@@ -574,8 +633,16 @@ def backtest_crypto(runtime, crypto_cfg):
                 if rm_enabled and target_map:
                     if len(rets) >= rm_vol_lb:
                         rv = float(np.std(rets[-rm_vol_lb:]) * np.sqrt(ppy))
-                        if rv > 1e-8 and rm_target_vol > 0:
-                            lev_now = rm_target_vol / rv
+                        rm_target_vol_eff = rm_target_vol
+                        if rm_regime_target_vol_enabled:
+                            if regime_state == "risk_on":
+                                rm_target_vol_eff = rm_target_vol_up
+                            elif regime_state == "risk_off":
+                                rm_target_vol_eff = rm_target_vol_down
+                            else:
+                                rm_target_vol_eff = rm_target_vol_neutral
+                        if rv > 1e-8 and rm_target_vol_eff > 0:
+                            lev_now = rm_target_vol_eff / rv
                             lev_now = max(rm_lev_min, min(rm_lev_max, lev_now))
                     target_map = {s: w * lev_now for s, w in target_map.items()}
 

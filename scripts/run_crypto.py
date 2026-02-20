@@ -113,7 +113,7 @@ def build_crypto_targets(runtime, crypto, risk):
     ma_window = int(signal_cfg.get("ma_window_bars", 180))
     vol_window = int(signal_cfg.get("vol_window_bars", 20))
     momentum_threshold = float(signal_cfg.get("momentum_threshold_pct", 0.0)) / 100.0
-    is_advanced_engine = engine in {"advanced_rmm", "advanced_ls_rmm"}
+    is_advanced_engine = engine in {"advanced_rmm", "advanced_ls_rmm", "advanced_ls_cs"}
     ls_long_alloc_pct = float(signal_cfg.get("ls_long_alloc_pct", alloc_pct))
     ls_short_alloc_pct = float(signal_cfg.get("ls_short_alloc_pct", alloc_pct))
     ls_short_requires_risk_off = bool(signal_cfg.get("ls_short_requires_risk_off", False))
@@ -133,8 +133,17 @@ def build_crypto_targets(runtime, crypto, risk):
     ls_regime_neutral_short_alloc_pct = float(
         signal_cfg.get("ls_regime_neutral_short_alloc_pct", ls_short_alloc_pct)
     )
+    ls_neutral_exposure_multiplier = float(signal_cfg.get("ls_neutral_exposure_multiplier", 1.0))
     ls_regime_down_long_alloc_pct = float(signal_cfg.get("ls_regime_down_long_alloc_pct", ls_long_alloc_pct))
     ls_regime_down_short_alloc_pct = float(signal_cfg.get("ls_regime_down_short_alloc_pct", ls_short_alloc_pct))
+    ls_confidence_scaling_enabled = bool(signal_cfg.get("ls_confidence_scaling_enabled", False))
+    ls_confidence_min_spread = float(signal_cfg.get("ls_confidence_min_spread", 0.12))
+    ls_confidence_full_spread = float(
+        signal_cfg.get(
+            "ls_confidence_full_spread",
+            max(ls_confidence_min_spread + 1e-6, 0.32),
+        )
+    )
 
     factor_w = signal_cfg.get(
         "factor_weights", {"momentum": 0.60, "low_vol": 0.25, "drawdown": 0.15}
@@ -225,6 +234,8 @@ def build_crypto_targets(runtime, crypto, risk):
     est_portfolio_vol_ann = None
     long_budget_used = 0.0
     short_budget_used = 0.0
+    signal_confidence = 1.0
+    score_spread = None
     if is_advanced_engine:
         single_cap = float(
             signal_cfg.get(
@@ -232,12 +243,20 @@ def build_crypto_targets(runtime, crypto, risk):
                 risk["position_limits"].get("crypto_single_max_pct", alloc_pct),
             )
         )
-        long_candidates = [s for s in picks if raw[s]["trend_on"] and raw[s]["momentum"] > momentum_threshold]
-        short_candidates = [
-            s for s in short_picks if (not raw[s]["trend_on"]) and raw[s]["momentum"] < -momentum_threshold
-        ]
+        if engine == "advanced_ls_cs":
+            long_candidates = [s for s in picks if raw[s]["momentum"] > momentum_threshold]
+            short_candidates = [s for s in short_picks if raw[s]["momentum"] < -momentum_threshold]
+            if not long_candidates:
+                long_candidates = list(picks)
+            if not short_candidates:
+                short_candidates = list(short_picks)
+        else:
+            long_candidates = [s for s in picks if raw[s]["trend_on"] and raw[s]["momentum"] > momentum_threshold]
+            short_candidates = [
+                s for s in short_picks if (not raw[s]["trend_on"]) and raw[s]["momentum"] < -momentum_threshold
+            ]
         target_map = {}
-        if engine == "advanced_ls_rmm":
+        if engine in {"advanced_ls_rmm", "advanced_ls_cs"}:
             long_budget = max(0.0, ls_long_alloc_pct)
             short_budget = max(0.0, ls_short_alloc_pct)
             if ls_dynamic_budget_enabled:
@@ -250,6 +269,9 @@ def build_crypto_targets(runtime, crypto, risk):
                 else:
                     long_budget = max(0.0, ls_regime_neutral_long_alloc_pct)
                     short_budget = max(0.0, ls_regime_neutral_short_alloc_pct)
+                    neutral_mult = max(0.0, min(1.5, ls_neutral_exposure_multiplier))
+                    long_budget *= neutral_mult
+                    short_budget *= neutral_mult
             long_budget_used = long_budget
             short_budget_used = short_budget
             if long_candidates and long_budget > 0:
@@ -275,6 +297,16 @@ def build_crypto_targets(runtime, crypto, risk):
                     for s in short_candidates:
                         w = short_budget * (inv_vol[s] / inv_sum)
                         target_map[s] = target_map.get(s, 0.0) - min(w, single_cap)
+            if ls_confidence_scaling_enabled and target_map and len(scored) >= 2:
+                score_spread = float(scored[0][1] - scored[-1][1])
+                hi = max(ls_confidence_full_spread, ls_confidence_min_spread + 1e-8)
+                if score_spread <= ls_confidence_min_spread:
+                    signal_confidence = 0.0
+                elif score_spread >= hi:
+                    signal_confidence = 1.0
+                else:
+                    signal_confidence = (score_spread - ls_confidence_min_spread) / (hi - ls_confidence_min_spread)
+                target_map = {s: w * signal_confidence for s, w in target_map.items()}
         else:
             if not risk_off and long_candidates:
                 inv_vol = {s: 1.0 / max(raw[s]["vol_ann"], 1e-8) for s in long_candidates}
@@ -295,13 +327,25 @@ def build_crypto_targets(runtime, crypto, risk):
         rm_enabled = bool(rm_cfg.get("enabled", False))
         if rm_enabled and target_map:
             target_vol_ann = float(rm_cfg.get("target_vol_annual", 0.0))
+            regime_target_vol_enabled = bool(rm_cfg.get("regime_target_vol_enabled", False))
+            target_vol_up = float(rm_cfg.get("target_vol_up_annual", target_vol_ann))
+            target_vol_neutral = float(rm_cfg.get("target_vol_neutral_annual", target_vol_ann))
+            target_vol_down = float(rm_cfg.get("target_vol_down_annual", target_vol_ann))
             vol_lb = int(rm_cfg.get("vol_lookback_bars", vol_window))
             lev_max = float(rm_cfg.get("max_leverage", max(1, int(trade_cfg.get("leverage", 1)))))
             lev_min = float(rm_cfg.get("min_leverage", 0.2))
             series_map = {s: raw[s]["close"] for s in target_map.keys()}
             est_portfolio_vol_ann = _estimate_portfolio_vol_annual(series_map, target_map, vol_lb, ppy)
-            if (target_vol_ann > 0) and est_portfolio_vol_ann and est_portfolio_vol_ann > 1e-8:
-                leverage_multiplier = target_vol_ann / est_portfolio_vol_ann
+            target_vol_eff = target_vol_ann
+            if regime_target_vol_enabled:
+                if regime_state == "risk_on":
+                    target_vol_eff = target_vol_up
+                elif regime_state == "risk_off":
+                    target_vol_eff = target_vol_down
+                else:
+                    target_vol_eff = target_vol_neutral
+            if (target_vol_eff > 0) and est_portfolio_vol_ann and est_portfolio_vol_ann > 1e-8:
+                leverage_multiplier = target_vol_eff / est_portfolio_vol_ann
                 leverage_multiplier = max(lev_min, min(lev_max, leverage_multiplier))
                 target_map = {s: w * leverage_multiplier for s, w in target_map.items()}
 
@@ -336,7 +380,11 @@ def build_crypto_targets(runtime, crypto, risk):
         # 合约模式 risk_off 默认平仓到 0 仓（不产生目标仓位）
         targets = []
 
-    note = "v3 dual-side long/short targets" if engine == "advanced_ls_rmm" else "v3 multifactor targets"
+    note = (
+        "v3 dual-side long/short targets"
+        if engine in {"advanced_ls_rmm", "advanced_ls_cs"}
+        else "v3 multifactor targets"
+    )
     return {
         "ts": datetime.now().isoformat(),
         "market": "crypto",
@@ -358,6 +406,12 @@ def build_crypto_targets(runtime, crypto, risk):
         "ls_long_alloc_pct": round(float(ls_long_alloc_pct), 4),
         "ls_short_alloc_pct": round(float(ls_short_alloc_pct), 4),
         "ls_short_requires_risk_off": ls_short_requires_risk_off,
+        "ls_neutral_exposure_multiplier": round(float(ls_neutral_exposure_multiplier), 4),
+        "ls_confidence_scaling_enabled": ls_confidence_scaling_enabled,
+        "ls_confidence_min_spread": round(float(ls_confidence_min_spread), 6),
+        "ls_confidence_full_spread": round(float(ls_confidence_full_spread), 6),
+        "signal_confidence": round(float(signal_confidence), 6),
+        "score_spread": None if score_spread is None else round(float(score_spread), 6),
         "risk_off": risk_off,
         "leverage_multiplier": round(float(leverage_multiplier), 4),
         "est_portfolio_vol_annual": None if est_portfolio_vol_ann is None else round(float(est_portfolio_vol_ann), 6),
