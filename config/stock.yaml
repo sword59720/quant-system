@@ -11,12 +11,15 @@ defensive_symbol: "511010"
 global_model:
   rebalance_days: 30
   momentum_lb: 300
-  ma_window: 200
-  vol_window: 30
+  ma_window: 180
+  vol_window: 40
   warmup_min_days: 126
   top_n: 5
   fee: 0.0008
   min_score: 0.02
+  risk_on_score_mix: 0.35
+  risk_on_score_floor: 0.02
+  risk_on_score_power: 1.0
   defensive_bypass_single_max: true
   execution_guard:
     enabled: true
@@ -30,6 +33,18 @@ global_model:
       floor: 0.018
       ceil: 0.050
     force_rebalance_on_regime_change: false
+  risk_governor:
+    enabled: true
+    vol_window: 20
+    target_daily_vol: 0.009
+    min_alloc_mult: 0.50
+    max_alloc_mult: 1.60
+    dd_window: 120
+    dd_trigger: -0.04
+    dd_alloc_mult: 0.10
+    momentum_window: 20
+    momentum_trigger: -0.03
+    momentum_alloc_mult: 0.50
   risk_overlay:
     enabled: true
     monitor_file: ./outputs/reports/stock_paper_forward_latest.json

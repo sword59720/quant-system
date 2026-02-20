@@ -87,6 +87,117 @@ def calc_turnover(old_w: dict, new_w: dict, symbols: list) -> float:
     return float(sum(abs(new_w.get(s, 0.0) - old_w.get(s, 0.0)) for s in symbols))
 
 
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def compute_risk_alloc_multiplier(
+    prices: pd.DataFrame,
+    i: int,
+    benchmark_symbol: str,
+    params: dict,
+) -> tuple[float, dict]:
+    cfg = params.get("risk_governor", {}) if isinstance(params, dict) else {}
+    enabled = bool(cfg.get("enabled", False))
+    meta = {
+        "enabled": enabled,
+        "alloc_mult": 1.0,
+        "vol_mult": 1.0,
+        "dd_cap_applied": False,
+        "momentum_cap_applied": False,
+        "benchmark_vol": None,
+        "benchmark_dd": None,
+        "benchmark_momentum": None,
+    }
+    if not enabled:
+        return 1.0, meta
+
+    close = prices[benchmark_symbol]
+    vol_window = int(cfg.get("vol_window", 20))
+    target_daily_vol = float(cfg.get("target_daily_vol", 0.012))
+    min_alloc_mult = float(cfg.get("min_alloc_mult", 0.30))
+    max_alloc_mult = float(cfg.get("max_alloc_mult", 1.00))
+    dd_window = int(cfg.get("dd_window", 120))
+    dd_trigger = float(cfg.get("dd_trigger", -0.08))
+    dd_alloc_mult = float(cfg.get("dd_alloc_mult", 0.45))
+    momentum_window = int(cfg.get("momentum_window", 20))
+    momentum_trigger = float(cfg.get("momentum_trigger", -0.03))
+    momentum_alloc_mult = float(cfg.get("momentum_alloc_mult", 0.60))
+
+    ret = close.pct_change()
+    r0 = max(1, i - vol_window + 1)
+    vol_slice = ret.iloc[r0 : i + 1].dropna()
+    vol_mult = 1.0
+    if len(vol_slice) >= 2:
+        bench_vol = float(vol_slice.std())
+        meta["benchmark_vol"] = bench_vol
+        if bench_vol > 1e-8:
+            vol_mult = target_daily_vol / bench_vol
+    vol_mult = _clamp(float(vol_mult), min_alloc_mult, max_alloc_mult)
+
+    dd_start = max(0, i - dd_window + 1)
+    dd_window_close = close.iloc[dd_start : i + 1]
+    if len(dd_window_close) > 0:
+        peak = float(dd_window_close.max())
+        dd_now = float(close.iloc[i] / max(peak, 1e-8) - 1.0)
+        meta["benchmark_dd"] = dd_now
+    else:
+        dd_now = 0.0
+
+    mom_now = None
+    if i >= momentum_window:
+        mom_now = float(close.iloc[i] / close.iloc[i - momentum_window] - 1.0)
+        meta["benchmark_momentum"] = mom_now
+
+    alloc_mult = vol_mult
+    if dd_now <= dd_trigger:
+        alloc_mult = min(alloc_mult, dd_alloc_mult)
+        meta["dd_cap_applied"] = True
+    if (mom_now is not None) and (mom_now <= momentum_trigger):
+        alloc_mult = min(alloc_mult, momentum_alloc_mult)
+        meta["momentum_cap_applied"] = True
+
+    alloc_mult = _clamp(float(alloc_mult), min_alloc_mult, max_alloc_mult)
+    meta["alloc_mult"] = alloc_mult
+    meta["vol_mult"] = vol_mult
+    return alloc_mult, meta
+
+
+def build_risk_on_weights(
+    scores: dict,
+    picks: list,
+    score_mix: float,
+    score_floor: float,
+    score_power: float,
+) -> dict:
+    if not picks:
+        return {}
+    mix = max(0.0, min(1.0, float(score_mix)))
+    power = max(0.1, float(score_power))
+
+    inv_vol = {s: 1.0 / max(float(scores[s]["vol"]), 1e-6) for s in picks}
+    inv_total = sum(inv_vol.values())
+    ivol_weights = {s: (inv_vol[s] / inv_total if inv_total > 0 else 1.0 / len(picks)) for s in picks}
+    if mix <= 1e-12:
+        return ivol_weights
+
+    score_raw = {}
+    for s in picks:
+        val = max(float(scores[s]["score"]) - float(score_floor), 0.0)
+        score_raw[s] = val**power
+    score_total = sum(score_raw.values())
+    if score_total <= 1e-12:
+        score_weights = {s: 1.0 / len(picks) for s in picks}
+    else:
+        score_weights = {s: score_raw[s] / score_total for s in picks}
+
+    mixed = {s: (1.0 - mix) * ivol_weights[s] + mix * score_weights[s] for s in picks}
+    mixed_total = sum(mixed.values())
+    if mixed_total <= 1e-12:
+        return ivol_weights
+    return {s: mixed[s] / mixed_total for s in picks}
+
+
 def build_signal(
     prices: pd.DataFrame,
     i: int,
@@ -103,6 +214,9 @@ def build_signal(
     vol_window = int(params["vol_window"])
     top_n = int(params["top_n"])
     min_score = float(params.get("min_score", 0.0))
+    risk_on_score_mix = float(params.get("risk_on_score_mix", 0.0))
+    risk_on_score_floor = float(params.get("risk_on_score_floor", min_score))
+    risk_on_score_power = float(params.get("risk_on_score_power", 1.0))
     defensive_bypass_single_max = bool(params.get("defensive_bypass_single_max", True))
 
     ret = prices.pct_change().fillna(0.0)
@@ -119,12 +233,29 @@ def build_signal(
 
     target = {s: 0.0 for s in symbols}
     reason = "risk_off"
+    risk_weights = {}
+    risk_governor_meta = {
+        "enabled": bool(params.get("risk_governor", {}).get("enabled", False)) if isinstance(params, dict) else False,
+        "alloc_mult": 1.0,
+    }
     if regime_on and eligible:
+        alloc_mult, risk_governor_meta = compute_risk_alloc_multiplier(
+            prices=prices,
+            i=i,
+            benchmark_symbol=benchmark_symbol,
+            params=params,
+        )
+        risk_alloc = alloc_pct * alloc_mult
         picks = sorted(eligible, key=lambda s: scores[s]["score"], reverse=True)[:top_n]
-        inv_vol = {s: 1.0 / max(scores[s]["vol"], 1e-6) for s in picks}
-        total_inv = sum(inv_vol.values())
-        for s, v in inv_vol.items():
-            target[s] = alloc_pct * (v / total_inv)
+        risk_weights = build_risk_on_weights(
+            scores=scores,
+            picks=picks,
+            score_mix=risk_on_score_mix,
+            score_floor=risk_on_score_floor,
+            score_power=risk_on_score_power,
+        )
+        for s, w in risk_weights.items():
+            target[s] = risk_alloc * w
         for s in picks:
             if (not defensive_bypass_single_max) or s != defensive_symbol:
                 target[s] = min(target[s], single_max)
@@ -151,9 +282,10 @@ def build_signal(
                 "momentum": round(scores[s]["momentum"], 6),
                 "vol": round(scores[s]["vol"], 6),
                 "score": round(scores[s]["score"], 6),
+                "risk_weight": round(float(risk_weights.get(s, 0.0)), 6),
             }
         )
-    return target, regime_on, reason, score_rows
+    return target, regime_on, reason, score_rows, risk_governor_meta
 
 
 def run_paper_forward(runtime, stock, risk):
@@ -222,7 +354,7 @@ def run_paper_forward(runtime, stock, risk):
             exposure_cfg,
         )
         min_turnover, min_turnover_meta = resolve_min_turnover(min_turnover_base, alloc_effective, guard_cfg)
-        proposed, regime_on, signal_reason, score_rows = build_signal(
+        proposed, regime_on, signal_reason, score_rows, risk_governor_meta = build_signal(
             prices=prices,
             i=i,
             symbols=symbols,
@@ -291,6 +423,8 @@ def run_paper_forward(runtime, stock, risk):
                 "min_turnover_effective": float(min_turnover),
                 "regime_on": bool(regime_on),
                 "signal_reason": signal_reason,
+                "risk_alloc_mult": float(risk_governor_meta.get("alloc_mult", 1.0)),
+                "risk_governor": json.dumps(risk_governor_meta, ensure_ascii=False),
                 "days_since_last_rebalance": days_since,
                 "proposed_turnover": round(proposed_turnover, 6),
                 "executed_turnover": round(turnover, 6),
@@ -401,6 +535,11 @@ def run_paper_forward(runtime, stock, risk):
             "min_turnover": float(last["min_turnover_effective"]),
             "dynamic_min_turnover": min_turnover_meta,
             "force_rebalance_on_regime_change": force_regime,
+        },
+        "risk_governor": {
+            "enabled": bool(model_cfg.get("risk_governor", {}).get("enabled", False)),
+            "params": model_cfg.get("risk_governor", {}),
+            "latest_alloc_mult": float(last.get("risk_alloc_mult", 1.0)),
         },
         "exposure_gate": {
             "enabled": bool(exposure_cfg.get("enabled", False)),
