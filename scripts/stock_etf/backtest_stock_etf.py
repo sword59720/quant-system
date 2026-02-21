@@ -265,6 +265,108 @@ def extract_data_fingerprint(stock_result):
     return stock_result.get("data_fingerprint")
 
 
+def extract_snapshot_file(stock_result):
+    if not isinstance(stock_result, dict):
+        return None
+    if stock_result.get("mode") == "global_momentum_both":
+        prod = stock_result.get("production")
+        if isinstance(prod, dict):
+            return prod.get("snapshot_file")
+        return None
+    return stock_result.get("snapshot_file")
+
+
+def summarize_returns(ret_s, periods_per_year=252):
+    ret_s = pd.Series(ret_s, dtype=float)
+    nav = pd.Series([1.0] + (1.0 + ret_s).cumprod().tolist(), dtype=float)
+    return {
+        "periods": int(len(ret_s)),
+        "annual_return": annualized_return(nav, periods_per_year),
+        "max_drawdown": max_drawdown(nav),
+        "sharpe": sharpe_ratio(ret_s, periods_per_year),
+        "final_nav": float(nav.iloc[-1]),
+    }
+
+
+def evaluate_window_from_history(win_df):
+    if not isinstance(win_df, pd.DataFrame):
+        return {"error": "invalid window dataframe"}
+    if ("strategy_ret" not in win_df.columns) or ("benchmark_ret_alloc" not in win_df.columns):
+        return {"error": "missing strategy_ret/benchmark_ret_alloc columns"}
+
+    cols = ["date", "strategy_ret", "benchmark_ret_alloc"]
+    tmp = win_df[cols].copy()
+    tmp["strategy_ret"] = pd.to_numeric(tmp["strategy_ret"], errors="coerce")
+    tmp["benchmark_ret_alloc"] = pd.to_numeric(tmp["benchmark_ret_alloc"], errors="coerce")
+    tmp = tmp.dropna().reset_index(drop=True)
+    if len(tmp) < 2:
+        return {"error": f"window too short: {len(tmp)} rows"}
+
+    strategy = summarize_returns(tmp["strategy_ret"], 252)
+    benchmark = summarize_returns(tmp["benchmark_ret_alloc"], 252)
+    return {
+        "rows": int(len(tmp)),
+        "date_start": str(pd.Timestamp(tmp["date"].iloc[0]).date()),
+        "date_end": str(pd.Timestamp(tmp["date"].iloc[-1]).date()),
+        "strategy": strategy,
+        "benchmark_alloc": benchmark,
+        "excess_annual_return_vs_alloc": float(strategy["annual_return"] - benchmark["annual_return"]),
+    }
+
+
+def build_oos_window_report(snapshot_file, data_fingerprint, stock_cfg):
+    if not snapshot_file:
+        return {"available": False, "reason": "missing_snapshot_file"}
+    if not os.path.exists(snapshot_file):
+        return {"available": False, "reason": f"snapshot_missing: {snapshot_file}"}
+
+    history = pd.read_csv(snapshot_file)
+    if "date" not in history.columns:
+        return {"available": False, "reason": "snapshot missing date column"}
+    history["date"] = pd.to_datetime(history["date"])
+    history = history.sort_values("date").reset_index(drop=True)
+    if len(history) < 2:
+        return {"available": False, "reason": f"snapshot too short: {len(history)} rows"}
+
+    window_defs = {
+        "full_period": {"kind": "all"},
+        "oos_30pct": {"kind": "tail_pct", "pct": 0.30},
+        "oos_20pct": {"kind": "tail_pct", "pct": 0.20},
+        "oos_2023": {"kind": "start_date", "date": "2023-01-03"},
+        "oos_2024": {"kind": "start_date", "date": "2024-01-02"},
+    }
+    cpcv_windows = ((stock_cfg.get("validation", {}) or {}).get("cpcv", {}) or {}).get("windows", {}) or {}
+    for name, cfg in cpcv_windows.items():
+        start_date = (cfg or {}).get("start_date")
+        if start_date:
+            window_defs[str(name)] = {"kind": "start_date", "date": str(start_date)}
+
+    windows = {}
+    for name, spec in window_defs.items():
+        kind = spec.get("kind")
+        if kind == "all":
+            win_df = history
+        elif kind == "tail_pct":
+            pct = float(spec.get("pct", 0.2))
+            pct = max(0.01, min(0.99, pct))
+            start_idx = max(0, int(len(history) * (1.0 - pct)))
+            win_df = history.iloc[start_idx:].reset_index(drop=True)
+        elif kind == "start_date":
+            dt = pd.Timestamp(spec.get("date"))
+            win_df = history[history["date"] >= dt].reset_index(drop=True)
+        else:
+            windows[name] = {"error": f"unsupported window kind: {kind}"}
+            continue
+        windows[name] = evaluate_window_from_history(win_df)
+
+    return {
+        "available": True,
+        "snapshot_file": snapshot_file,
+        "data_fingerprint": data_fingerprint or {},
+        "windows": windows,
+    }
+
+
 def backtest_stock(runtime, stock_cfg, risk_cfg, backtest_mode_override=None):
     if stock_cfg.get("mode") == "global_momentum":
         backtest_mode = str(backtest_mode_override or stock_cfg.get("backtest_mode", "production")).lower()
@@ -426,6 +528,9 @@ def main():
     data_fingerprint = extract_data_fingerprint(stock)
     if data_fingerprint:
         report["data_fingerprint"] = data_fingerprint
+    snapshot_file = extract_snapshot_file(stock)
+    if snapshot_file:
+        report["oos_windows"] = build_oos_window_report(snapshot_file, data_fingerprint, stock_cfg)
     compare_report = {
         "ts": report["ts"],
         "note": "stock production vs research comparison summary",
