@@ -129,9 +129,9 @@ backtest:
     vol_change: 1.00
     volume_change: 1.00
     sentiment: 1.20
-    boll_percent: -1.00  # 负权重表示超跌时买入信号
-    boll_width: 0.50     # 布林带宽度变化
-    boll_break: -1.50    # 突破信号权重
+    boll_percent: 0.00  # 负权重表示超跌时买入信号
+    boll_width: 0.00     # 布林带宽度变化
+    boll_break: 0.00    # 突破信号权重
   fee_buy_bps: 0.8
   fee_sell_bps: 0.8
   stamp_tax_sell_bps: 5
