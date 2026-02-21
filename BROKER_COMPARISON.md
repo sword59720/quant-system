@@ -107,7 +107,7 @@ env: "live"                     # paper | live
 
 ### 第四步：修改执行脚本
 
-编辑 `scripts/execute_trades.py`，修改 `load_config()` 函数：
+编辑 `scripts/stock_etf/execute_trades_stock_etf.py`，修改 `load_config()` 函数：
 
 ```python
 def load_config() -> dict:
@@ -142,7 +142,7 @@ def load_config() -> dict:
 
 ### 第五步：修改交易适配器导入
 
-编辑 `scripts/execute_trades.py`，修改导入部分：
+编辑 `scripts/stock_etf/execute_trades_stock_etf.py`，修改导入部分：
 
 ```python
 from adapters.guotou_trader import create_trader as create_guotou_trader
@@ -165,10 +165,10 @@ def create_trader(config: dict):
 cd /home/haojc/.openclaw/workspace/quant-system
 
 # 1. 模拟测试
-./.venv/bin/python scripts/trade_all.py --dry-run
+./.venv/bin/python scripts/stock_etf/trade_stock_etf.py --dry-run
 
 # 2. 实盘运行
-./.venv/bin/python scripts/trade_all.py
+./.venv/bin/python scripts/stock_etf/trade_stock_etf.py
 ```
 
 ---

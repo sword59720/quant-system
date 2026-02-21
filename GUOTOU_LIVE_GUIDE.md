@@ -3,9 +3,9 @@
 ## 🎯 当前状态
 
 - ✅ 交易适配器已创建 (`adapters/guotou_trader.py`)
-- ✅ 交易执行脚本已创建 (`scripts/execute_trades.py`)
+- ✅ 交易执行脚本已创建 (`scripts/stock_etf/execute_trades_stock_etf.py`)
 - ✅ 券商配置模板已创建 (`config/broker.yaml`)
-- ✅ 一键交易脚本已创建 (`scripts/trade_all.py`)
+- ✅ 一键交易脚本已创建 (`scripts/stock_etf/trade_stock_etf.py`)
 
 ## 📝 切换实盘前必须完成的步骤
 
@@ -113,7 +113,7 @@ env: live
 cd /home/haojc/.openclaw/workspace/quant-system
 
 # 执行模拟交易（不实际下单）
-./.venv/bin/python scripts/trade_all.py --dry-run
+./.venv/bin/python scripts/stock_etf/trade_stock_etf.py --dry-run
 ```
 
 #### 5.2 查看生成的交易指令
@@ -127,7 +127,7 @@ cat outputs/orders/stock_trades.json
 ```bash
 # 修改 config/runtime.yaml 中的 total_capital 为小额资金（如 10000）
 # 然后执行实盘交易
-./.venv/bin/python scripts/trade_all.py
+./.venv/bin/python scripts/stock_etf/trade_stock_etf.py
 ```
 
 ### 步骤 6: 自动化运行（可选）
@@ -139,7 +139,7 @@ cat outputs/orders/stock_trades.json
 crontab -e
 
 # 添加（每周一 15:00 收盘后执行）
-0 15 * * 1 cd /home/haojc/.openclaw/workspace/quant-system && ./.venv/bin/python scripts/trade_all.py --yes >> logs/cron_trade.log 2>&1
+0 15 * * 1 cd /home/haojc/.openclaw/workspace/quant-system && ./.venv/bin/python scripts/stock_etf/trade_stock_etf.py --yes >> logs/cron_trade.log 2>&1
 ```
 
 ## ⚠️ 风险控制
@@ -213,5 +213,5 @@ crontab -e
 
 ```bash
 cd /home/haojc/.openclaw/workspace/quant-system
-./.venv/bin/python scripts/trade_all.py
+./.venv/bin/python scripts/stock_etf/trade_stock_etf.py
 ```

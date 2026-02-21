@@ -7,8 +7,8 @@ import unittest
 
 import yaml
 
-from scripts.paper_forward_stock import run_paper_forward
-from scripts.report_stock_weekly import build_weekly_summary
+from scripts.stock_etf.paper_forward_stock import run_paper_forward
+from scripts.stock_etf.report_stock_weekly import build_weekly_summary
 
 
 class TestPaperForwardWeekly(unittest.TestCase):

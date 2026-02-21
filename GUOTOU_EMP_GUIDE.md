@@ -196,7 +196,7 @@ def enable_alphat(self, symbols: List[str]):
 
 ```bash
 cd /home/haojc/.openclaw/workspace/quant-system
-./.venv/bin/python scripts/trade_all.py --dry-run
+./.venv/bin/python scripts/stock_etf/trade_stock_etf.py --dry-run
 ```
 
 #### 2. EMP沙箱测试
@@ -211,7 +211,7 @@ nano config/runtime.yaml
 # total_capital: 10000
 
 # 执行实盘（会连接到EMP平台）
-./.venv/bin/python scripts/trade_all.py
+./.venv/bin/python scripts/stock_etf/trade_stock_etf.py
 ```
 
 ---

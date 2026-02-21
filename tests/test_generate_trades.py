@@ -5,7 +5,8 @@ import json
 import tempfile
 import unittest
 
-from scripts.generate_trades import build_market_orders
+from scripts.crypto.generate_trades_crypto import build_crypto_orders
+from scripts.stock_etf.generate_trades_stock_etf import build_stock_orders
 
 
 class TestGenerateTrades(unittest.TestCase):
@@ -29,7 +30,7 @@ class TestGenerateTrades(unittest.TestCase):
             with open(pos_file, "w", encoding="utf-8") as f:
                 json.dump({"positions": [{"symbol": "159915", "weight": 0.2}]}, f)
 
-            out = build_market_orders("stock", target_file, pos_file, out_file, total_capital=20000)
+            out = build_stock_orders(target_file, pos_file, out_file, total_capital=20000)
             self.assertEqual(out["market"], "stock")
             self.assertEqual(len(out["orders"]), 2)
             self.assertTrue(any(x["symbol"] == "159915" and x["action"] == "BUY" for x in out["orders"]))
@@ -64,7 +65,7 @@ class TestGenerateTrades(unittest.TestCase):
                     f,
                 )
 
-            out = build_market_orders("crypto", target_file, pos_file, out_file, total_capital=20000)
+            out = build_crypto_orders(target_file, pos_file, out_file, total_capital=20000)
             actions = {(x["symbol"], x["action"]): x for x in out["orders"]}
 
             self.assertIn(("BTC/USDT", "CLOSE_LONG"), actions)

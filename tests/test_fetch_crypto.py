@@ -7,7 +7,7 @@ from unittest import mock
 
 import pandas as pd
 
-from scripts.fetch_crypto_data import (
+from scripts.crypto.fetch_crypto_data import (
     fetch_ccxt_klines,
     fetch_htx_klines,
     has_valid_cache,
@@ -24,7 +24,7 @@ class TestFetchCrypto(unittest.TestCase):
         self.assertEqual(to_htx_symbol("BTC/USDT"), "btcusdt")
         self.assertEqual(to_htx_symbol("ETH/USDT"), "ethusdt")
 
-    @mock.patch("scripts.fetch_crypto_data.requests.get")
+    @mock.patch("scripts.crypto.fetch_crypto_data.requests.get")
     def test_fetch_htx_klines_parse(self, mock_get):
         mock_resp = mock.Mock()
         mock_resp.raise_for_status.return_value = None
@@ -43,7 +43,7 @@ class TestFetchCrypto(unittest.TestCase):
         self.assertTrue(df["date"].iloc[0] < df["date"].iloc[1])
         self.assertAlmostEqual(float(df["volume"].iloc[0]), 10.0)
 
-    @mock.patch("scripts.fetch_crypto_data.requests.get")
+    @mock.patch("scripts.crypto.fetch_crypto_data.requests.get")
     def test_fetch_htx_klines_uses_runtime_timezone(self, mock_get):
         mock_resp = mock.Mock()
         mock_resp.raise_for_status.return_value = None
@@ -113,8 +113,8 @@ class TestFetchCrypto(unittest.TestCase):
         e = RuntimeError("ProxyError: Unable to connect to proxy")
         self.assertTrue(is_proxy_connection_error(e))
 
-    @mock.patch("scripts.fetch_crypto_data.requests.Session")
-    @mock.patch("scripts.fetch_crypto_data.requests.get")
+    @mock.patch("scripts.crypto.fetch_crypto_data.requests.Session")
+    @mock.patch("scripts.crypto.fetch_crypto_data.requests.get")
     def test_http_get_with_proxy_policy_auto_retry_direct_on_proxy_error(self, mock_get, mock_session_cls):
         mock_get.side_effect = RuntimeError("ProxyError: Unable to connect to proxy")
         mock_session = mock.Mock()
@@ -136,10 +136,10 @@ class TestFetchCrypto(unittest.TestCase):
         self.assertFalse(mock_session.trust_env)
         self.assertEqual(mock_session.close.call_count, 1)
 
-    @mock.patch("scripts.fetch_crypto_data.requests.get")
+    @mock.patch("scripts.crypto.fetch_crypto_data.requests.get")
     def test_http_get_with_proxy_policy_direct_mode(self, mock_get):
         mock_get.return_value = mock.Mock()
-        with mock.patch("scripts.fetch_crypto_data.requests.Session") as mock_session_cls:
+        with mock.patch("scripts.crypto.fetch_crypto_data.requests.Session") as mock_session_cls:
             mock_session = mock.Mock()
             mock_session.get.return_value = mock.Mock()
             mock_session_cls.return_value = mock_session

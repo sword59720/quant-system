@@ -52,3 +52,5 @@ def normalize_rank(values: dict, ascending: bool = False):
     for i, (k, _) in enumerate(items):
         out[k] = 1.0 - i / (n - 1)
     return out
+
+

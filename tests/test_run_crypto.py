@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from scripts.run_crypto import build_crypto_targets, maybe_auto_execute_live
+from scripts.crypto.run_crypto import build_crypto_targets, maybe_auto_execute_live
 
 
 class TestRunCrypto(unittest.TestCase):
@@ -261,8 +261,8 @@ class TestRunCrypto(unittest.TestCase):
             crypto = {"execution": {"auto_place_order": True, "min_order_notional": 100}}
             target_file = os.path.join(tmpdir, "target.json")
 
-            with patch("scripts.generate_trades.build_market_orders") as mock_build, patch(
-                "scripts.execute_trades.execute_trades"
+            with patch("scripts.crypto.generate_trades_crypto.build_crypto_orders") as mock_build, patch(
+                "scripts.crypto.execute_trades_crypto.execute_trades"
             ) as mock_execute:
                 mock_build.return_value = {
                     "orders": [
