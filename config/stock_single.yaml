@@ -1,0 +1,151 @@
+enabled: false
+market: CN_STOCK_SINGLE
+mode: single_stock_hourly
+
+capital_alloc_pct: 1.00
+max_symbols_in_pool: 300
+max_positions: 10
+industry_diversification:
+  enabled: true
+  max_industry_weight: 0.30
+  min_industry_count: 5
+liquidity_filter:
+  enabled: true
+  min_avg_turnover: 100000000
+  min_avg_volume: 1000000
+
+schedule:
+  hourly_eval_times: ["09:45", "10:45", "11:15", "13:45", "14:45"]
+  fast_risk_check_interval_minutes: 5
+
+data:
+  fetch_daily: true
+  fetch_minute: false
+  fetch_valuation: true
+  fetch_fund_flow: true
+  minute_period: "5"
+  adjust: "qfq"
+  history_years_daily: 5
+  history_days_minute: 120
+  history_years_valuation: 5
+  history_years_fund_flow: 3
+  history_years_fund_flow_proxy: 5
+  incremental_overlap_days: 5
+  daily_output_dir: ./data/stock_single/daily
+  minute_output_dir: ./data/stock_single/minute_5m
+  valuation_output_dir: ./data/stock_single/valuation
+  # Effective merged flow used by legacy readers and diagnostics.
+  fund_flow_output_dir: ./data/stock_single/fund_flow
+  # Layered flow stores:
+  # - real: direct provider data (akshare/eastmoney/sina)
+  # - proxy: estimated from baostock daily bars
+  fund_flow_real_output_dir: ./data/stock_single/fund_flow_real
+  fund_flow_proxy_output_dir: ./data/stock_single/fund_flow_proxy
+  # Which flow set is consumed by factor scoring.
+  fund_flow_factor_output_dir: ./data/stock_single/fund_flow_real
+  # real_only | real_with_proxy_backfill | proxy_only
+  fund_flow_merge_mode: real_with_proxy_backfill
+  fund_flow_proxy_enabled: true
+
+data_guard:
+  min_cache_rows_daily: 200
+  max_cache_age_days_daily: 10
+  min_cache_rows_minute: 200
+  max_cache_age_days_minute: 3
+  min_cache_rows_valuation: 120
+  max_cache_age_days_valuation: 30
+  min_cache_rows_fund_flow: 120
+  max_cache_age_days_fund_flow: 15
+  min_cache_rows_fund_flow_proxy: 240
+  max_cache_age_days_fund_flow_proxy: 30
+
+pool:
+  source_file: ./data/stock_single/universe.csv
+  symbol_column: symbol
+  static_fallback: []
+  selection:
+    target_pool_size: 60
+    entry_quantile: 0.30
+    exit_quantile: 0.50
+    min_pool_hold_days: 5
+    min_history_days: 120
+    st_filter: true
+    suspension_lookback_days: 20
+    max_zero_volume_ratio: 0.20
+    recent_limit_lookback_days: 5
+    limit_move_threshold_pct: 9.7
+    max_recent_limit_hits: 2
+    industry_file: ./data/stock_single/industry_map.csv
+
+signal:
+  trigger_mode: topk  # threshold | quantile | topk
+  buy_threshold: 1.50
+  sell_threshold: -0.80
+  buy_score_quantile: 0.80
+  sell_score_quantile: 0.30
+  buy_top_k: 15
+  hold_top_k: 25
+  buy_buffer_bps: 10
+  sell_buffer_bps: 10
+  per_signal_target_weight: 0.10
+  time_series_momentum_window: 20
+  volatility_adjusted_signal: true
+
+risk:
+  single_max_pct: 0.15
+  fast_check:
+    enabled: true
+    snapshot_file: ./data/stock_single/intraday_risk_latest.csv
+    trigger_portfolio_ret_5m: -0.012
+    trigger_single_ret_5m: -0.025
+    trigger_vol_zscore: 3.5
+    block_new_buys_on_trigger: true
+    force_sell_on_single_crash: true
+  dynamic_risk_budget:
+    enabled: true
+    target_volatility: 0.15
+    max_volatility: 0.25
+    min_volatility: 0.05
+  stop_loss:
+    enabled: true
+    stop_loss_pct: 0.08
+    trailing_stop: true
+    trailing_stop_pct: 0.12
+
+backtest:
+  benchmark_symbol: "510300"
+  warmup_days: 60
+  require_factor_data: false
+  min_factor_coverage: 0.05
+  score_weights:
+    mom20: 3.00
+    mom60: 2.50
+    rev5: -0.50
+    vol20: -0.30
+    vol_spike: 0.60
+    ep: 0.10
+    bp: 0.10
+    main_flow: 3.00
+    vol_change: 1.00
+    volume_change: 1.00
+    sentiment: 1.20
+    boll_percent: -1.00  # 负权重表示超跌时买入信号
+    boll_width: 0.50     # 布林带宽度变化
+    boll_break: -1.50    # 突破信号权重
+  fee_buy_bps: 0.8
+  fee_sell_bps: 0.8
+  stamp_tax_sell_bps: 5
+  slippage_bps: 0.6
+  trade_execution:
+    enabled: true
+    max_turnover: 0.25
+    min_holding_period: 1
+    order_splitting: true
+    max_order_size_pct: 0.5
+    trade_timing: optimal
+
+paths:
+  pool_file: ./outputs/orders/stock_single_pool.json
+  signal_file: ./outputs/orders/stock_single_signals.json
+  risk_state_file: ./outputs/orders/stock_single_risk_state.json
+  risk_alert_file: ./outputs/orders/stock_single_risk_alerts.json
