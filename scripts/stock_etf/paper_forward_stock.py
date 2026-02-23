@@ -7,6 +7,7 @@ import os
 import sys
 from collections import Counter
 from datetime import datetime
+from typing import Optional
 
 import pandas as pd
 import yaml
@@ -198,6 +199,218 @@ def build_risk_on_weights(
     return {s: mixed[s] / mixed_total for s in picks}
 
 
+def _normalize_float_weights(weights: list, n: int) -> list[float]:
+    if n <= 0:
+        return []
+    out = []
+    for w in (weights or []):
+        try:
+            out.append(float(w))
+        except (TypeError, ValueError):
+            continue
+    if len(out) != n:
+        return [1.0 / n] * n
+    total = sum(max(x, 0.0) for x in out)
+    if total <= 1e-12:
+        return [1.0 / n] * n
+    return [max(x, 0.0) / total for x in out]
+
+
+def _resolve_structural_cfg(params: dict) -> dict:
+    cfg = params.get("structural_upgrade", {}) if isinstance(params, dict) else {}
+    enabled = bool(cfg.get("enabled", False))
+    windows = []
+    for x in cfg.get("momentum_windows", [20, 60, 180]):
+        try:
+            w = int(x)
+        except (TypeError, ValueError):
+            continue
+        if w > 1:
+            windows.append(w)
+    if not windows:
+        windows = [max(2, int(params.get("momentum_lb", 252)))]
+    weights = _normalize_float_weights(cfg.get("momentum_weights", [0.5, 0.3, 0.2]), len(windows))
+
+    breadth_on_threshold = float(cfg.get("breadth_on_threshold", 0.60))
+    breadth_off_threshold = float(cfg.get("breadth_off_threshold", 0.35))
+    if breadth_off_threshold > breadth_on_threshold:
+        breadth_off_threshold = breadth_on_threshold
+
+    trend_mult_min = float(cfg.get("trend_alloc_mult_min", 0.75))
+    trend_mult_max = float(cfg.get("trend_alloc_mult_max", 1.35))
+    if trend_mult_max < trend_mult_min:
+        trend_mult_max = trend_mult_min
+
+    breadth_mult_min = float(cfg.get("breadth_alloc_mult_min", 0.70))
+    breadth_mult_max = float(cfg.get("breadth_alloc_mult_max", 1.25))
+    if breadth_mult_max < breadth_mult_min:
+        breadth_mult_max = breadth_mult_min
+
+    total_mult_min = float(cfg.get("total_alloc_mult_min", 0.70))
+    total_mult_max = float(cfg.get("total_alloc_mult_max", 1.60))
+    if total_mult_max < total_mult_min:
+        total_mult_max = total_mult_min
+
+    phase2_total_mult_min = float(cfg.get("phase2_total_mult_min", 0.80))
+    phase2_total_mult_max = float(cfg.get("phase2_total_mult_max", 1.20))
+    if phase2_total_mult_max < phase2_total_mult_min:
+        phase2_total_mult_max = phase2_total_mult_min
+
+    adaptive_min_top_n = max(1, int(cfg.get("phase2_adaptive_min_top_n", 1)))
+    adaptive_max_top_n = max(adaptive_min_top_n, int(cfg.get("phase2_adaptive_max_top_n", int(params.get("top_n", 1)))))
+
+    return {
+        "enabled": enabled,
+        "momentum_windows": windows,
+        "momentum_weights": weights,
+        "eligibility_require_trend": bool(cfg.get("eligibility_require_trend", False)),
+        "score_blend": _clamp(float(cfg.get("score_blend", 0.35)), 0.0, 1.0),
+        "relative_momentum_window": max(2, int(cfg.get("relative_momentum_window", 60))),
+        "relative_momentum_weight": float(cfg.get("relative_momentum_weight", 0.20)),
+        "asset_trend_ma_window": max(2, int(cfg.get("asset_trend_ma_window", 80))),
+        "breadth_on_threshold": breadth_on_threshold,
+        "breadth_off_threshold": breadth_off_threshold,
+        "neutral_alloc_mult": max(0.0, float(cfg.get("neutral_alloc_mult", 0.65))),
+        "neutral_top_n": max(1, int(cfg.get("neutral_top_n", max(1, int(params.get("top_n", 1)) - 1)))),
+        "trend_strength_k": float(cfg.get("trend_strength_k", 8.0)),
+        "trend_alloc_mult_min": trend_mult_min,
+        "trend_alloc_mult_max": trend_mult_max,
+        "breadth_alloc_mult_min": breadth_mult_min,
+        "breadth_alloc_mult_max": breadth_mult_max,
+        "total_alloc_mult_min": total_mult_min,
+        "total_alloc_mult_max": total_mult_max,
+        "phase2_enabled": bool(cfg.get("phase2_enabled", False)),
+        "phase2_vol_short_window": max(2, int(cfg.get("phase2_vol_short_window", 15))),
+        "phase2_vol_long_window": max(5, int(cfg.get("phase2_vol_long_window", 80))),
+        "phase2_vol_calm_ratio": float(cfg.get("phase2_vol_calm_ratio", 0.85)),
+        "phase2_vol_stress_ratio": float(cfg.get("phase2_vol_stress_ratio", 1.20)),
+        "phase2_vol_mult_calm": float(cfg.get("phase2_vol_mult_calm", 1.08)),
+        "phase2_vol_mult_normal": float(cfg.get("phase2_vol_mult_normal", 1.00)),
+        "phase2_vol_mult_stress": float(cfg.get("phase2_vol_mult_stress", 0.78)),
+        "phase2_recovery_enabled": bool(cfg.get("phase2_recovery_enabled", True)),
+        "phase2_recovery_window": max(20, int(cfg.get("phase2_recovery_window", 180))),
+        "phase2_recovery_trigger_drawdown": float(cfg.get("phase2_recovery_trigger_drawdown", -0.08)),
+        "phase2_recovery_momentum_window": max(2, int(cfg.get("phase2_recovery_momentum_window", 20))),
+        "phase2_recovery_max_mult": float(cfg.get("phase2_recovery_max_mult", 1.20)),
+        "phase2_total_mult_min": phase2_total_mult_min,
+        "phase2_total_mult_max": phase2_total_mult_max,
+        "phase2_adaptive_enabled": bool(cfg.get("phase2_adaptive_enabled", True)),
+        "phase2_adaptive_min_top_n": adaptive_min_top_n,
+        "phase2_adaptive_max_top_n": adaptive_max_top_n,
+        "phase2_adaptive_calm_top_n_delta": int(cfg.get("phase2_adaptive_calm_top_n_delta", -1)),
+        "phase2_adaptive_stress_top_n_delta": int(cfg.get("phase2_adaptive_stress_top_n_delta", 1)),
+        "phase2_adaptive_high_dispersion_threshold": float(
+            cfg.get("phase2_adaptive_high_dispersion_threshold", 0.22)
+        ),
+        "phase2_adaptive_high_dispersion_top_n_delta": int(cfg.get("phase2_adaptive_high_dispersion_top_n_delta", -1)),
+        "phase2_adaptive_score_power_calm_mult": float(cfg.get("phase2_adaptive_score_power_calm_mult", 1.20)),
+        "phase2_adaptive_score_power_stress_mult": float(cfg.get("phase2_adaptive_score_power_stress_mult", 0.85)),
+    }
+
+
+def _weighted_momentum(series: pd.Series, i: int, windows: list[int], weights: list[float]) -> Optional[float]:
+    if len(windows) != len(weights) or not windows:
+        return None
+    vals = []
+    for w in windows:
+        if i < w:
+            return None
+        prev = float(series.iloc[i - w])
+        if abs(prev) <= 1e-12:
+            return None
+        vals.append(float(series.iloc[i] / prev - 1.0))
+    return float(sum(weights[k] * vals[k] for k in range(len(vals))))
+
+
+def _compute_vol_state_multiplier(
+    benchmark_ret: pd.Series,
+    i: int,
+    cfg: dict,
+) -> tuple[str, float, Optional[float]]:
+    sw = int(cfg.get("phase2_vol_short_window", 15))
+    lw = max(sw + 1, int(cfg.get("phase2_vol_long_window", 80)))
+    if i < lw:
+        return "normal", float(cfg.get("phase2_vol_mult_normal", 1.0)), None
+
+    short_vol = float(benchmark_ret.iloc[i - sw + 1 : i + 1].std())
+    long_vol = float(benchmark_ret.iloc[i - lw + 1 : i + 1].std())
+    if long_vol <= 1e-8:
+        return "normal", float(cfg.get("phase2_vol_mult_normal", 1.0)), None
+
+    ratio = float(short_vol / long_vol)
+    calm_r = float(cfg.get("phase2_vol_calm_ratio", 0.85))
+    stress_r = float(cfg.get("phase2_vol_stress_ratio", 1.20))
+    if ratio <= calm_r:
+        return "calm", float(cfg.get("phase2_vol_mult_calm", 1.08)), ratio
+    if ratio >= stress_r:
+        return "stress", float(cfg.get("phase2_vol_mult_stress", 0.78)), ratio
+    return "normal", float(cfg.get("phase2_vol_mult_normal", 1.0)), ratio
+
+
+def _compute_drawdown_recovery_multiplier(
+    benchmark_close: pd.Series,
+    i: int,
+    cfg: dict,
+) -> tuple[float, dict]:
+    meta = {
+        "enabled": bool(cfg.get("phase2_recovery_enabled", True)),
+        "drawdown": None,
+        "drawdown_depth": None,
+        "recovery_progress": None,
+        "momentum": None,
+    }
+    if not meta["enabled"]:
+        return 1.0, meta
+
+    window = int(cfg.get("phase2_recovery_window", 180))
+    trigger_dd = float(cfg.get("phase2_recovery_trigger_drawdown", -0.08))
+    mom_w = int(cfg.get("phase2_recovery_momentum_window", 20))
+    max_mult = max(1.0, float(cfg.get("phase2_recovery_max_mult", 1.20)))
+    if i < max(window, mom_w):
+        return 1.0, meta
+
+    sl = benchmark_close.iloc[i - window + 1 : i + 1]
+    peak = float(sl.max())
+    trough = float(sl.min())
+    px = float(benchmark_close.iloc[i])
+    if peak <= 1e-12:
+        return 1.0, meta
+
+    dd_now = float(px / peak - 1.0)
+    dd_depth = float(trough / peak - 1.0)
+    meta["drawdown"] = dd_now
+    meta["drawdown_depth"] = dd_depth
+    if dd_depth > trigger_dd:
+        return 1.0, meta
+
+    if (peak - trough) <= 1e-12:
+        return 1.0, meta
+    recovery_progress = float((px - trough) / (peak - trough))
+    recovery_progress = _clamp(recovery_progress, 0.0, 1.0)
+    meta["recovery_progress"] = recovery_progress
+
+    prev = float(benchmark_close.iloc[i - mom_w])
+    if abs(prev) <= 1e-12:
+        return 1.0, meta
+    mom = float(px / prev - 1.0)
+    meta["momentum"] = mom
+    if mom <= 0.0:
+        return 1.0, meta
+
+    mult = 1.0 + (max_mult - 1.0) * recovery_progress
+    return float(_clamp(mult, 1.0, max_mult)), meta
+
+
+def _score_dispersion(scores: dict, eligible: list[str]) -> float:
+    vals = sorted([float(scores[s]["score"]) for s in eligible if s in scores], reverse=True)
+    if len(vals) < 2:
+        return 0.0
+    ref = max(abs(vals[0]), 1e-6)
+    if len(vals) >= 3:
+        return float(max(0.0, (vals[0] - vals[2]) / ref))
+    return float(max(0.0, (vals[0] - vals[-1]) / ref))
+
+
 def build_signal(
     prices: pd.DataFrame,
     i: int,
@@ -218,18 +431,112 @@ def build_signal(
     risk_on_score_floor = float(params.get("risk_on_score_floor", min_score))
     risk_on_score_power = float(params.get("risk_on_score_power", 1.0))
     defensive_bypass_single_max = bool(params.get("defensive_bypass_single_max", True))
+    structural_cfg = _resolve_structural_cfg(params)
+    structural_enabled = bool(structural_cfg["enabled"])
 
     ret = prices.pct_change().fillna(0.0)
     scores = {}
+    benchmark_close = prices[benchmark_symbol]
+    benchmark_ma = None
+    benchmark_trend_on = False
+    if i + 1 >= ma_window:
+        benchmark_ma = float(benchmark_close.iloc[i - ma_window + 1 : i + 1].mean())
+        benchmark_trend_on = bool(prices[benchmark_symbol].iloc[i] >= benchmark_ma)
+
+    benchmark_rel_momentum = None
+    rel_w = int(structural_cfg["relative_momentum_window"])
+    if structural_enabled and i >= rel_w:
+        bench_prev = float(benchmark_close.iloc[i - rel_w])
+        if abs(bench_prev) > 1e-12:
+            benchmark_rel_momentum = float(benchmark_close.iloc[i] / bench_prev - 1.0)
+
     for s in risk_symbols:
-        m = prices[s].iloc[i] / prices[s].iloc[i - momentum_lb] - 1.0
+        close = prices[s]
+        need = max(momentum_lb, vol_window)
+        if structural_enabled:
+            need = max(
+                need,
+                max(structural_cfg["momentum_windows"]),
+                rel_w,
+                int(structural_cfg["asset_trend_ma_window"]),
+            )
+        if i < need:
+            continue
+
+        if structural_enabled:
+            long_prev = float(close.iloc[i - momentum_lb])
+            if abs(long_prev) <= 1e-12:
+                continue
+            long_m = float(close.iloc[i] / long_prev - 1.0)
+            comp_m = _weighted_momentum(
+                series=close,
+                i=i,
+                windows=structural_cfg["momentum_windows"],
+                weights=structural_cfg["momentum_weights"],
+            )
+            if comp_m is None:
+                continue
+            rel_m = 0.0
+            if benchmark_rel_momentum is not None and i >= rel_w:
+                sym_prev = float(close.iloc[i - rel_w])
+                if abs(sym_prev) > 1e-12:
+                    sym_rel = float(close.iloc[i] / sym_prev - 1.0)
+                    rel_m = float(sym_rel - benchmark_rel_momentum)
+            struct_signal = float(comp_m + structural_cfg["relative_momentum_weight"] * rel_m)
+            blend = float(structural_cfg["score_blend"])
+            m = float((1.0 - blend) * long_m + blend * struct_signal)
+            asset_ma_window = int(structural_cfg["asset_trend_ma_window"])
+            asset_ma = float(close.iloc[i - asset_ma_window + 1 : i + 1].mean())
+            trend_ok = bool(close.iloc[i] >= asset_ma)
+        else:
+            m = float(prices[s].iloc[i] / prices[s].iloc[i - momentum_lb] - 1.0)
+            comp_m = m
+            rel_m = 0.0
+            trend_ok = True
+
         vol = float(ret[s].iloc[i - vol_window + 1 : i + 1].std())
         if vol <= 0:
             continue
-        scores[s] = {"momentum": float(m), "vol": vol, "score": float(m / max(vol, 1e-6))}
+        scores[s] = {
+            "momentum": float(m),
+            "composite_momentum": float(comp_m),
+            "relative_momentum": float(rel_m),
+            "trend_ok": bool(trend_ok),
+            "vol": vol,
+            "score": float(m / max(vol, 1e-6)),
+        }
 
-    regime_on = bool(prices[benchmark_symbol].iloc[i] >= prices[benchmark_symbol].iloc[i - ma_window + 1 : i + 1].mean())
-    eligible = [s for s in scores if scores[s]["score"] > min_score]
+    breadth_universe = [s for s in scores.keys() if s != benchmark_symbol] or list(scores.keys())
+    breadth = 0.0
+    if breadth_universe:
+        breadth_count = sum(
+            1
+            for s in breadth_universe
+            if bool(scores[s]["trend_ok"]) and float(scores[s]["composite_momentum"]) > 0.0
+        )
+        breadth = float(breadth_count / len(breadth_universe))
+
+    if structural_enabled:
+        if benchmark_trend_on and breadth >= float(structural_cfg["breadth_on_threshold"]):
+            regime_state = "risk_on"
+        elif benchmark_trend_on and breadth >= float(structural_cfg["breadth_off_threshold"]):
+            regime_state = "neutral"
+        else:
+            regime_state = "risk_off"
+    else:
+        regime_state = "risk_on" if benchmark_trend_on else "risk_off"
+
+    regime_on = bool(regime_state != "risk_off")
+    if structural_enabled:
+        eligible = [
+            s
+            for s in scores
+            if scores[s]["score"] > min_score
+            and ((not structural_cfg["eligibility_require_trend"]) or scores[s]["trend_ok"])
+            and scores[s]["composite_momentum"] > 0.0
+        ]
+    else:
+        eligible = [s for s in scores if scores[s]["score"] > min_score]
 
     target = {s: 0.0 for s in symbols}
     reason = "risk_off"
@@ -237,22 +544,136 @@ def build_signal(
     risk_governor_meta = {
         "enabled": bool(params.get("risk_governor", {}).get("enabled", False)) if isinstance(params, dict) else False,
         "alloc_mult": 1.0,
+        "structural_enabled": bool(structural_enabled),
+        "regime_state": str(regime_state),
+        "benchmark_trend_on": bool(benchmark_trend_on),
+        "benchmark_ma": benchmark_ma,
+        "breadth": float(breadth),
+        "neutral_alloc_mult": float(structural_cfg["neutral_alloc_mult"]),
+        "trend_alloc_mult": 1.0,
+        "breadth_alloc_mult": 1.0,
+        "structural_alloc_mult": 1.0,
+        "risk_alloc_base": float(alloc_pct),
+        "risk_alloc_before_rg": float(alloc_pct),
+        "phase2_enabled": bool(structural_enabled and structural_cfg.get("phase2_enabled", False)),
+        "phase2_vol_state": "normal",
+        "phase2_vol_ratio": None,
+        "phase2_vol_mult": 1.0,
+        "phase2_recovery_mult": 1.0,
+        "phase2_recovery_drawdown": None,
+        "phase2_recovery_progress": None,
+        "phase2_alloc_mult": 1.0,
+        "score_dispersion": 0.0,
+        "top_n_effective": int(top_n),
+        "score_power_effective": float(risk_on_score_power),
     }
-    if regime_on and eligible:
-        alloc_mult, risk_governor_meta = compute_risk_alloc_multiplier(
+    if regime_state in {"risk_on", "neutral"} and eligible:
+        risk_alloc_base = float(alloc_pct)
+        if regime_state == "neutral":
+            risk_alloc_base *= float(structural_cfg["neutral_alloc_mult"])
+
+        trend_alloc_mult = 1.0
+        breadth_alloc_mult = 1.0
+        structural_alloc_mult = 1.0
+        if structural_enabled and benchmark_ma is not None and abs(float(benchmark_ma)) > 1e-12:
+            trend_strength = float(prices[benchmark_symbol].iloc[i] / benchmark_ma - 1.0)
+            trend_alloc_mult = _clamp(
+                1.0 + trend_strength * float(structural_cfg["trend_strength_k"]),
+                float(structural_cfg["trend_alloc_mult_min"]),
+                float(structural_cfg["trend_alloc_mult_max"]),
+            )
+            breadth_target = (
+                float(structural_cfg["breadth_on_threshold"])
+                if regime_state == "risk_on"
+                else float(structural_cfg["breadth_off_threshold"])
+            )
+            breadth_alloc_mult = _clamp(
+                float(breadth / max(breadth_target, 1e-6)),
+                float(structural_cfg["breadth_alloc_mult_min"]),
+                float(structural_cfg["breadth_alloc_mult_max"]),
+            )
+            structural_alloc_mult = _clamp(
+                float(trend_alloc_mult * breadth_alloc_mult),
+                float(structural_cfg["total_alloc_mult_min"]),
+                float(structural_cfg["total_alloc_mult_max"]),
+            )
+
+        top_n_base = int(top_n if regime_state == "risk_on" else min(top_n, structural_cfg["neutral_top_n"]))
+        top_n_eff = max(1, top_n_base)
+        score_power_eff = float(risk_on_score_power)
+        phase2_alloc_mult = 1.0
+        phase2_vol_state = "normal"
+        phase2_vol_ratio = None
+        phase2_vol_mult = 1.0
+        phase2_recovery_mult = 1.0
+        phase2_recovery_meta = {}
+        if structural_enabled and bool(structural_cfg.get("phase2_enabled", False)):
+            phase2_vol_state, phase2_vol_mult, phase2_vol_ratio = _compute_vol_state_multiplier(
+                benchmark_ret=ret[benchmark_symbol],
+                i=i,
+                cfg=structural_cfg,
+            )
+            phase2_recovery_mult, phase2_recovery_meta = _compute_drawdown_recovery_multiplier(
+                benchmark_close=benchmark_close,
+                i=i,
+                cfg=structural_cfg,
+            )
+            phase2_alloc_mult = _clamp(
+                float(phase2_vol_mult * phase2_recovery_mult),
+                float(structural_cfg["phase2_total_mult_min"]),
+                float(structural_cfg["phase2_total_mult_max"]),
+            )
+            if bool(structural_cfg.get("phase2_adaptive_enabled", True)):
+                score_disp = _score_dispersion(scores=scores, eligible=eligible)
+                if phase2_vol_state == "calm":
+                    top_n_eff += int(structural_cfg["phase2_adaptive_calm_top_n_delta"])
+                    score_power_eff *= float(structural_cfg["phase2_adaptive_score_power_calm_mult"])
+                elif phase2_vol_state == "stress":
+                    top_n_eff += int(structural_cfg["phase2_adaptive_stress_top_n_delta"])
+                    score_power_eff *= float(structural_cfg["phase2_adaptive_score_power_stress_mult"])
+                if score_disp >= float(structural_cfg["phase2_adaptive_high_dispersion_threshold"]):
+                    top_n_eff += int(structural_cfg["phase2_adaptive_high_dispersion_top_n_delta"])
+                top_n_eff = int(
+                    _clamp(
+                        float(top_n_eff),
+                        float(structural_cfg["phase2_adaptive_min_top_n"]),
+                        float(structural_cfg["phase2_adaptive_max_top_n"]),
+                    )
+                )
+                top_n_eff = min(top_n_eff, max(1, len(eligible)))
+                risk_governor_meta["score_dispersion"] = float(score_disp)
+
+        risk_alloc_pre_rg = float(risk_alloc_base * structural_alloc_mult * phase2_alloc_mult)
+        alloc_mult, rg_meta = compute_risk_alloc_multiplier(
             prices=prices,
             i=i,
             benchmark_symbol=benchmark_symbol,
             params=params,
         )
-        risk_alloc = alloc_pct * alloc_mult
-        picks = sorted(eligible, key=lambda s: scores[s]["score"], reverse=True)[:top_n]
+        risk_governor_meta.update(rg_meta)
+        risk_governor_meta["trend_alloc_mult"] = float(trend_alloc_mult)
+        risk_governor_meta["breadth_alloc_mult"] = float(breadth_alloc_mult)
+        risk_governor_meta["structural_alloc_mult"] = float(structural_alloc_mult)
+        risk_governor_meta["risk_alloc_base"] = float(risk_alloc_base)
+        risk_governor_meta["risk_alloc_before_rg"] = float(risk_alloc_pre_rg)
+        risk_governor_meta["phase2_vol_state"] = str(phase2_vol_state)
+        risk_governor_meta["phase2_vol_ratio"] = phase2_vol_ratio
+        risk_governor_meta["phase2_vol_mult"] = float(phase2_vol_mult)
+        risk_governor_meta["phase2_recovery_mult"] = float(phase2_recovery_mult)
+        risk_governor_meta["phase2_recovery_drawdown"] = phase2_recovery_meta.get("drawdown")
+        risk_governor_meta["phase2_recovery_progress"] = phase2_recovery_meta.get("recovery_progress")
+        risk_governor_meta["phase2_alloc_mult"] = float(phase2_alloc_mult)
+        risk_governor_meta["top_n_effective"] = int(top_n_eff)
+        risk_governor_meta["score_power_effective"] = float(score_power_eff)
+
+        risk_alloc = float(risk_alloc_pre_rg * alloc_mult)
+        picks = sorted(eligible, key=lambda s: scores[s]["score"], reverse=True)[: max(1, top_n_eff)]
         risk_weights = build_risk_on_weights(
             scores=scores,
             picks=picks,
             score_mix=risk_on_score_mix,
             score_floor=risk_on_score_floor,
-            score_power=risk_on_score_power,
+            score_power=score_power_eff,
         )
         for s, w in risk_weights.items():
             target[s] = risk_alloc * w
@@ -266,11 +687,13 @@ def build_signal(
                 target[defensive_symbol] += min(room, alloc_pct - used)
             else:
                 target[defensive_symbol] += alloc_pct - used
-        reason = "risk_on"
+        reason = "risk_on" if regime_state == "risk_on" else "risk_on_neutral"
     else:
         target[defensive_symbol] = alloc_pct
-        if not regime_on:
+        if not benchmark_trend_on:
             reason = "benchmark_below_ma"
+        elif regime_state == "risk_off":
+            reason = "breadth_risk_off"
         elif not eligible:
             reason = "no_positive_momentum"
 
@@ -280,6 +703,9 @@ def build_signal(
             {
                 "symbol": s,
                 "momentum": round(scores[s]["momentum"], 6),
+                "composite_momentum": round(scores[s]["composite_momentum"], 6),
+                "relative_momentum": round(scores[s]["relative_momentum"], 6),
+                "trend_ok": bool(scores[s]["trend_ok"]),
                 "vol": round(scores[s]["vol"], 6),
                 "score": round(scores[s]["score"], 6),
                 "risk_weight": round(float(risk_weights.get(s, 0.0)), 6),
@@ -291,6 +717,7 @@ def build_signal(
 def run_paper_forward(runtime, stock, risk):
     model_cfg = stock.get("global_model", {})
     guard_cfg = model_cfg.get("execution_guard", {})
+    overlay_cfg = model_cfg.get("risk_overlay", {})
     exposure_cfg = model_cfg.get("exposure_gate", {})
 
     benchmark_symbol = stock.get("benchmark_symbol", "510300")
@@ -305,10 +732,34 @@ def run_paper_forward(runtime, stock, risk):
 
     prices = load_price_frame(data_dir, symbols)
     warmup_min_days = int(model_cfg.get("warmup_min_days", 126))
+    struct_cfg = model_cfg.get("structural_upgrade", {}) or {}
+    struct_windows = []
+    for x in struct_cfg.get("momentum_windows", []):
+        try:
+            w = int(x)
+        except (TypeError, ValueError):
+            continue
+        if w > 1:
+            struct_windows.append(w)
+    struct_max_window = max(struct_windows) if (bool(struct_cfg.get("enabled", False)) and struct_windows) else 0
+    struct_rel_window = (
+        int(struct_cfg.get("relative_momentum_window", 60)) if bool(struct_cfg.get("enabled", False)) else 0
+    )
+    struct_asset_ma = int(struct_cfg.get("asset_trend_ma_window", 80)) if bool(struct_cfg.get("enabled", False)) else 0
+    struct_phase2_enabled = bool(struct_cfg.get("enabled", False)) and bool(struct_cfg.get("phase2_enabled", False))
+    struct_phase2_vol_long = int(struct_cfg.get("phase2_vol_long_window", 80)) if struct_phase2_enabled else 0
+    struct_phase2_recovery_window = int(struct_cfg.get("phase2_recovery_window", 180)) if struct_phase2_enabled else 0
+    struct_phase2_recovery_mom = int(struct_cfg.get("phase2_recovery_momentum_window", 20)) if struct_phase2_enabled else 0
     warmup = max(
         int(model_cfg.get("momentum_lb", 252)),
         int(model_cfg.get("ma_window", 200)),
         int(model_cfg.get("vol_window", 20)),
+        struct_max_window,
+        struct_rel_window,
+        struct_asset_ma,
+        struct_phase2_vol_long,
+        struct_phase2_recovery_window,
+        struct_phase2_recovery_mom,
         warmup_min_days,
     ) + 1
     if warmup >= len(prices) - 1:
@@ -319,11 +770,21 @@ def run_paper_forward(runtime, stock, risk):
     min_turnover_base = float(guard_cfg.get("min_turnover", 0.05))
     force_regime = bool(guard_cfg.get("force_rebalance_on_regime_change", True))
     guard_enabled = bool(guard_cfg.get("enabled", True))
+    defensive_bypass_single_max = bool(model_cfg.get("defensive_bypass_single_max", True))
+    overlay_enabled = bool(overlay_cfg.get("enabled", False))
+    overlay_trigger_excess_20d = float(overlay_cfg.get("trigger_excess_20d_vs_alloc", -0.02))
+    overlay_trigger_dd = float(overlay_cfg.get("trigger_strategy_drawdown", -0.12))
+    overlay_release_excess_20d = float(overlay_cfg.get("release_excess_20d_vs_alloc", 0.01))
+    overlay_release_dd = float(overlay_cfg.get("release_strategy_drawdown", -0.06))
+    overlay_min_defense_days = int(overlay_cfg.get("min_defense_days", 10))
+    overlay_sticky_mode = bool(overlay_cfg.get("sticky_mode", True))
 
     weights = {s: 0.0 for s in symbols}
     weights[defensive_symbol] = alloc_pct
     last_rebalance_date = None
     last_regime_on = None
+    overlay_state_active = False
+    overlay_activated_date = None
 
     strategy_nav = 1.0
     benchmark_nav_raw = 1.0
@@ -364,6 +825,97 @@ def run_paper_forward(runtime, stock, risk):
             single_max=single_max,
             params=model_cfg,
         )
+        proposed_before_overlay = proposed.copy()
+        overlay_meta = {
+            "enabled": bool(overlay_enabled),
+            "trigger_excess_20d_vs_alloc": float(overlay_trigger_excess_20d),
+            "trigger_strategy_drawdown": float(overlay_trigger_dd),
+            "release_excess_20d_vs_alloc": float(overlay_release_excess_20d),
+            "release_strategy_drawdown": float(overlay_release_dd),
+            "min_defense_days": int(overlay_min_defense_days),
+            "sticky_mode": bool(overlay_sticky_mode),
+            "triggered": False,
+            "trigger_reasons": [],
+            "released": False,
+            "release_reasons": [],
+            "state_active_before": bool(overlay_state_active),
+            "state_active_after": bool(overlay_state_active),
+            "activated_date": overlay_activated_date.isoformat() if overlay_activated_date else None,
+            "days_in_defense": None,
+            "metrics": {
+                "excess_return_20d_vs_alloc": None,
+                "strategy_dd": float(strategy_nav / strategy_peak - 1.0),
+            },
+        }
+        overlay_force_rebalance = False
+        overlay_force_reason = None
+        if overlay_enabled:
+            excess_20d = None
+            if hist_strategy_ret:
+                strat_s = pd.Series(hist_strategy_ret, dtype=float)
+                bench_s = pd.Series(hist_benchmark_ret_alloc, dtype=float)
+                ex_s = strat_s - bench_s
+                excess_20d = float(ex_s.tail(20).sum())
+            strategy_dd_now = float(strategy_nav / strategy_peak - 1.0)
+            overlay_meta["metrics"]["excess_return_20d_vs_alloc"] = excess_20d
+            overlay_meta["metrics"]["strategy_dd"] = strategy_dd_now
+
+            days_in_defense = None
+            if overlay_activated_date is not None:
+                days_in_defense = int((date.date() - overlay_activated_date).days)
+            overlay_meta["days_in_defense"] = days_in_defense
+
+            trigger_reasons = []
+            if (excess_20d is not None) and (float(excess_20d) <= overlay_trigger_excess_20d):
+                trigger_reasons.append("excess_20d_below_threshold")
+            if strategy_dd_now <= overlay_trigger_dd:
+                trigger_reasons.append("drawdown_below_threshold")
+
+            released = False
+            release_reasons = []
+            if overlay_sticky_mode and overlay_state_active:
+                release_ok = True
+                if (excess_20d is None) or (float(excess_20d) < overlay_release_excess_20d):
+                    release_ok = False
+                if strategy_dd_now < overlay_release_dd:
+                    release_ok = False
+                if (days_in_defense is None) or (days_in_defense < overlay_min_defense_days):
+                    release_ok = False
+                if release_ok:
+                    overlay_state_active = False
+                    released = True
+                    release_reasons.append("release_threshold_reached")
+                    overlay_activated_date = None
+            elif (not overlay_sticky_mode) and overlay_state_active and (not trigger_reasons):
+                overlay_state_active = False
+                released = True
+                release_reasons.append("trigger_cleared_non_sticky")
+                overlay_activated_date = None
+
+            if trigger_reasons:
+                overlay_state_active = True
+                if overlay_activated_date is None:
+                    overlay_activated_date = date.date()
+
+            if overlay_state_active:
+                tw = float(alloc_effective)
+                if not defensive_bypass_single_max:
+                    tw = min(tw, float(single_max))
+                proposed = {s: 0.0 for s in symbols}
+                proposed[defensive_symbol] = tw
+                if calc_turnover(proposed_before_overlay, proposed, symbols) > 1e-8:
+                    overlay_force_rebalance = True
+                    overlay_force_reason = "risk_overlay_active"
+            elif released:
+                overlay_force_rebalance = True
+                overlay_force_reason = "risk_overlay_released"
+
+            overlay_meta["triggered"] = bool(trigger_reasons)
+            overlay_meta["trigger_reasons"] = trigger_reasons
+            overlay_meta["released"] = bool(released)
+            overlay_meta["release_reasons"] = release_reasons
+            overlay_meta["state_active_after"] = bool(overlay_state_active)
+            overlay_meta["activated_date"] = overlay_activated_date.isoformat() if overlay_activated_date else None
 
         action = "rebalance"
         action_reason = "normal"
@@ -371,7 +923,11 @@ def run_paper_forward(runtime, stock, risk):
         proposed_turnover = calc_turnover(weights, proposed, symbols)
         days_since = None
 
-        if guard_enabled and last_rebalance_date is not None:
+        if overlay_force_rebalance:
+            action = "rebalance"
+            action_reason = str(overlay_force_reason or "risk_overlay")
+            executed = proposed
+        elif guard_enabled and last_rebalance_date is not None:
             days_since = (date.date() - last_rebalance_date).days
             if force_regime and last_regime_on is not None and regime_on != last_regime_on:
                 action = "rebalance"
@@ -425,6 +981,7 @@ def run_paper_forward(runtime, stock, risk):
                 "signal_reason": signal_reason,
                 "risk_alloc_mult": float(risk_governor_meta.get("alloc_mult", 1.0)),
                 "risk_governor": json.dumps(risk_governor_meta, ensure_ascii=False),
+                "risk_overlay": json.dumps(overlay_meta, ensure_ascii=False),
                 "days_since_last_rebalance": days_since,
                 "proposed_turnover": round(proposed_turnover, 6),
                 "executed_turnover": round(turnover, 6),
