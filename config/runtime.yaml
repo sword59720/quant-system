@@ -1,5 +1,11 @@
 enabled: true
 env: live          # paper | live
+# 兼容旧配置：股票默认券商（当未配置 stock_brokers 时生效）
+broker: guotou     # guotou | myquant
+# 按策略覆盖券商（优先级高于 broker）
+stock_brokers:
+  stock_etf: guotou
+  stock_single: guotou
 timezone: Asia/Shanghai
 base_currency: CNY
 total_capital: 40

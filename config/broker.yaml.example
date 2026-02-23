@@ -7,19 +7,28 @@
 myquant:
   name: "掘金量化"
   platform: "myquant"
-  
-  # 账户信息 (必填)
-  token: "YOUR_TOKEN_HERE"        # 从掘金官网获取
-  account_id: "YOUR_ACCOUNT_ID"   # 资金账号
-  
+
+  # 账户信息（兼容旧写法：直接填 token/account_id）
+  token: "YOUR_TOKEN_HERE"
+  account_id: "YOUR_ACCOUNT_ID"
+
   # 交易参数
   trade_mode: "live"              # paper | live
   order_type: "MARKET"            # MARKET | LIMIT
-  
+
   # API模式配置
   api:
     endpoint: "https://www.myquant.cn/api"
     timeout: 30
+
+  # 推荐写法：按策略分账户（两模块配置方式一致）
+  accounts:
+    stock_etf:
+      token: "YOUR_ETF_TOKEN"
+      account_id: "YOUR_ETF_ACCOUNT_ID"
+    stock_single:
+      token: "YOUR_SINGLE_TOKEN"
+      account_id: "YOUR_SINGLE_ACCOUNT_ID"
 
 # ============================================================
 # 国投证券 EMP 配置
@@ -27,21 +36,34 @@ myquant:
 guotou:
   name: "国投证券"
   platform: "emp"          # emp | traditional
-  
-  # 账户信息
+
+  # 账户信息（兼容旧写法：直接填 account_id/api_key/api_secret/api_endpoint）
   account_id: "YOUR_ACCOUNT_ID"
   api_key: "YOUR_API_KEY"
   api_secret: "YOUR_API_SECRET"
   api_endpoint: "YOUR_API_ENDPOINT"
-  
+
   # 交易参数
   trade_mode: "live"
   order_type: "MARKET"
-  
+
   emp:
     hosting_mode: "signal"   # signal | hosted
     use_alphat: false
     use_act: false
+
+  # 推荐写法：按策略分账户（两模块配置方式一致）
+  accounts:
+    stock_etf:
+      account_id: "YOUR_ETF_ACCOUNT_ID"
+      api_key: "YOUR_ETF_API_KEY"
+      api_secret: "YOUR_ETF_API_SECRET"
+      api_endpoint: "YOUR_ETF_API_ENDPOINT"
+    stock_single:
+      account_id: "YOUR_SINGLE_ACCOUNT_ID"
+      api_key: "YOUR_SINGLE_API_KEY"
+      api_secret: "YOUR_SINGLE_API_SECRET"
+      api_endpoint: "YOUR_SINGLE_API_ENDPOINT"
 
 # ============================================================
 # Crypto 交易所配置（CCXT）

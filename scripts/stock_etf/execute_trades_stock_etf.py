@@ -9,7 +9,12 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -17,6 +22,11 @@ from adapters.guotou_trader import Order as StockOrder
 from adapters.guotou_trader import OrderSide as StockOrderSide
 from adapters.guotou_trader import create_trader as create_guotou_trader
 from adapters.myquant_trader import create_trader as create_myquant_trader
+from core.stock_broker import (
+    SUPPORTED_STOCK_BROKERS,
+    resolve_runtime_stock_broker,
+    resolve_strategy_account_config,
+)
 
 
 def create_stock_trader(config: dict):
@@ -47,33 +57,74 @@ def load_trades(file_path: str) -> dict:
         return json.load(f)
 
 
-def load_config() -> dict:
+def load_config(*, force_paper: bool = False) -> dict:
     import yaml
 
     with open("./config/runtime.yaml", "r", encoding="utf-8") as f:
-        runtime = yaml.safe_load(f)
+        runtime = yaml.safe_load(f) or {}
 
-    broker_type = runtime.get("broker", "guotou")
-    env = runtime.get("env", "paper")
+    env = str(runtime.get("env", "paper")).strip().lower()
+    if force_paper:
+        env = "paper"
+    broker_type, broker_source = resolve_runtime_stock_broker(runtime, strategy="stock_etf")
     total_capital = runtime.get("total_capital", 20000)
+    timezone_name = str(runtime.get("timezone", "Asia/Shanghai")).strip() or "Asia/Shanghai"
+
+    if env == "live" and not broker_type:
+        raise ValueError("live 模式必须配置 stock_brokers.stock_etf（或兼容字段 broker）: myquant 或 guotou")
+    if not broker_type:
+        broker_type = "guotou"
+        broker_source = "default(guotou)"
+    if broker_type not in SUPPORTED_STOCK_BROKERS:
+        raise ValueError(f"不支持的 broker: {broker_type}")
 
     broker_full_config = {}
     if os.path.exists("./config/broker.yaml"):
         with open("./config/broker.yaml", "r", encoding="utf-8") as f:
-            broker_full_config = yaml.safe_load(f)
+            broker_full_config = yaml.safe_load(f) or {}
+
+    config, account_source = resolve_strategy_account_config(
+        broker_full_config,
+        broker=broker_type,
+        strategy="stock_etf",
+    )
+    if not isinstance(config, dict):
+        config = {}
 
     if broker_type == "myquant":
-        config = broker_full_config.get("myquant", {})
         config["platform"] = "myquant"
     else:
-        config = broker_full_config.get("guotou", {})
         config["platform"] = config.get("platform", "emp")
 
     config["env"] = env
     config["total_capital"] = total_capital
     config["broker"] = broker_type
+    config["_runtime_broker_source"] = broker_source or "unknown"
+    config["_runtime_account_source"] = account_source or broker_type
     config["_runtime_paths"] = runtime.get("paths", {})
+    config["_runtime_timezone"] = timezone_name
+
+    if env == "live" and broker_type == "guotou":
+        platform = str(config.get("platform", "emp")).strip().lower()
+        hosting_mode = str(config.get("emp", {}).get("hosting_mode", "signal")).strip().lower()
+        if platform == "emp" and hosting_mode == "signal":
+            raise ValueError(
+                "当前代码未实现 guotou EMP signal 实盘连接；"
+                "请切换 stock_brokers.stock_etf=myquant，或将 guotou.emp.hosting_mode 设为 hosted 并接入可用通道"
+            )
     return config
+
+
+def _now_in_timezone(tz_name: str) -> datetime:
+    tz = str(tz_name or "Asia/Shanghai").strip() or "Asia/Shanghai"
+    if ZoneInfo is not None:
+        try:
+            return datetime.now(ZoneInfo(tz))
+        except Exception:
+            pass
+    if tz == "Asia/Shanghai":
+        return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8)))
+    return datetime.now()
 
 
 def build_stock_order(trade: dict):
@@ -198,7 +249,11 @@ def execute_trades(trades_file: str, dry_run: bool = False):
         logger.error(f"❌ 非股票交易文件: market={market}")
         return False
 
-    config = load_config()
+    try:
+        config = load_config(force_paper=dry_run)
+    except Exception as e:
+        logger.error(f"❌ 加载交易配置失败: {e}")
+        return False
     if dry_run:
         config["env"] = "paper"
 
@@ -209,10 +264,13 @@ def execute_trades(trades_file: str, dry_run: bool = False):
     logger.info("开始执行股票交易")
     logger.info("环境: %s", env.upper())
     logger.info("券商: %s", broker_name)
+    logger.info("券商来源: %s", config.get("_runtime_broker_source", "unknown"))
+    logger.info("账户来源: %s", config.get("_runtime_account_source", "unknown"))
+    logger.info("时区: %s", config.get("_runtime_timezone", "Asia/Shanghai"))
     logger.info("=" * 60)
 
     if env == "live":
-        now = datetime.now()
+        now = _now_in_timezone(config.get("_runtime_timezone", "Asia/Shanghai"))
         current_time = now.time()
         is_trading_hours = (
             (current_time.hour == 9 and current_time.minute >= 30)
@@ -222,7 +280,7 @@ def execute_trades(trades_file: str, dry_run: bool = False):
             or (current_time.hour == 14)
         )
         if not is_trading_hours:
-            logger.warning("⚠️ 当前不在A股交易时间内，实盘订单可能无法成交")
+            logger.warning("⚠️ 当前不在A股交易时间内（%s），实盘订单可能无法成交", now.strftime("%H:%M:%S"))
 
     try:
         trader = create_stock_trader(config)
@@ -431,7 +489,11 @@ def main():
         print("=" * 60)
 
         if not args.yes and not args.dry_run:
-            config = load_config()
+            try:
+                config = load_config()
+            except Exception as e:
+                print(f"\n❌ 配置检查失败: {e}")
+                return
             env = config.get("env", "paper")
             broker = config.get("broker", "guotou")
             if env == "live":

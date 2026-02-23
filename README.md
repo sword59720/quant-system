@@ -60,6 +60,54 @@ enabled: true
 - `config/crypto.yaml`：币圈参数（现货/合约统一配置，当前默认 `exchange: htx_direct`）
 - `config/risk.yaml`：风控参数（仓位上限、回撤阈值等）
 
+`config/runtime.yaml` 支持按策略指定股票券商（兼容旧字段 `broker`）：
+
+```yaml
+broker: guotou
+stock_brokers:
+  stock_etf: guotou
+  stock_single: myquant
+```
+
+`config/broker.yaml` 里不同券商都用同一账户配置模式：`accounts.stock_etf` / `accounts.stock_single`。
+
+例如 ETF 走国投、single 走掘金时：
+
+```yaml
+guotou:
+  platform: emp
+  trade_mode: live
+  order_type: MARKET
+  emp:
+    hosting_mode: signal
+    use_alphat: false
+    use_act: false
+  accounts:
+    stock_etf:
+      account_id: "ETF_ACCOUNT"
+      api_key: "ETF_API_KEY"
+      api_secret: "ETF_API_SECRET"
+      api_endpoint: "ETF_API_ENDPOINT"
+    stock_single:
+      account_id: "SINGLE_ACCOUNT"
+      api_key: "SINGLE_API_KEY"
+      api_secret: "SINGLE_API_SECRET"
+      api_endpoint: "SINGLE_API_ENDPOINT"
+
+myquant:
+  platform: myquant
+  api:
+    endpoint: "https://www.myquant.cn/api"
+    timeout: 30
+  accounts:
+    stock_etf:
+      token: "ETF_TOKEN"
+      account_id: "ETF_ACCOUNT"
+    stock_single:
+      token: "SINGLE_TOKEN"
+      account_id: "SINGLE_ACCOUNT"
+```
+
 `config/crypto.yaml` 新增自动下单开关（默认关闭）：
 
 ```yaml
@@ -84,6 +132,18 @@ cd /home/haojc/.openclaw/workspace/quant-system
 ```
 
 > 说明：ETF 数据/信号/研究脚本统一位于 `scripts/stock_etf/`。
+
+按“收盘算信号 + 开盘执行”实盘链路手动执行：
+
+```bash
+# 收盘后（T日）
+./.venv/bin/python scripts/stock_etf/fetch_stock_etf_data.py
+./.venv/bin/python scripts/stock_etf/run_stock_etf.py
+
+# 次日开盘后（T+1）
+./.venv/bin/python scripts/stock_etf/preflight_stock_live.py --json-out ./outputs/reports/stock_live_preflight_latest.json
+./.venv/bin/python scripts/stock_etf/trade_stock_etf.py --skip-fetch --skip-calc --yes
+```
 
 ## 4.2 个股模型（构建股票池 + 小时信号，默认关闭）
 
@@ -210,6 +270,8 @@ cd /home/haojc/.openclaw/workspace/quant-system
 
 - 股票数据：工作日 16:05
 - 股票信号：工作日 16:10
+- 股票执行前检查：工作日 09:35（`preflight_stock_live.py`）
+- 股票自动执行：工作日 09:35（通过 `trade_stock_etf.py --skip-fetch --skip-calc --yes`）
 - 个股数据：工作日 15:05
 - 个股建池：工作日 15:15
 - 个股小时信号：09:45 / 10:45 / 11:15 / 13:45 / 14:45
@@ -287,7 +349,8 @@ cat outputs/reports/healthcheck_latest.log
 常看日志：
 
 ```bash
-tail -n 100 logs/cron_stock.log
+tail -n 100 logs/cron_stock_signal.log
+tail -n 100 logs/cron_stock_execute.log
 tail -n 100 logs/cron_crypto.log
 tail -n 100 logs/cron_health.log
 ```
@@ -378,6 +441,9 @@ A：默认流程是先运行 `backtest_stock_etf.py` 生成 `stock_backtest_snap
 ```yaml
 env: live
 enabled: true
+stock_brokers:
+  stock_etf: guotou
+  stock_single: myquant
 ```
 
 2. 手动单次试跑（先非交易时段验证流程）：
