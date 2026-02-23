@@ -90,6 +90,16 @@ sed \
   -e "s#__PYTHON__#${esc_python}#g" \
   "${TEMPLATE_FILE}" > "${OUTPUT_FILE}"
 
+if [[ -d "${TARGET_ROOT}" || "${APPLY}" == "true" ]]; then
+  mkdir -p \
+    "${TARGET_ROOT}/logs" \
+    "${TARGET_ROOT}/outputs/orders" \
+    "${TARGET_ROOT}/outputs/state" \
+    "${TARGET_ROOT}/outputs/reports"
+else
+  echo "[cron-install] target-root not found, skip runtime directory bootstrap: ${TARGET_ROOT}"
+fi
+
 echo "[cron-install] rendered: ${OUTPUT_FILE}"
 echo "[cron-install] target-root: ${TARGET_ROOT}"
 echo "[cron-install] python: ${PYTHON_BIN}"
