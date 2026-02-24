@@ -256,8 +256,16 @@ def _resolve_structural_cfg(params: dict) -> dict:
     if phase2_total_mult_max < phase2_total_mult_min:
         phase2_total_mult_max = phase2_total_mult_min
 
+    signal_strength_min_alloc_mult = float(cfg.get("signal_strength_min_alloc_mult", 0.70))
+    signal_strength_max_alloc_mult = float(cfg.get("signal_strength_max_alloc_mult", 1.10))
+    if signal_strength_max_alloc_mult < signal_strength_min_alloc_mult:
+        signal_strength_max_alloc_mult = signal_strength_min_alloc_mult
+
     adaptive_min_top_n = max(1, int(cfg.get("phase2_adaptive_min_top_n", 1)))
     adaptive_max_top_n = max(adaptive_min_top_n, int(cfg.get("phase2_adaptive_max_top_n", int(params.get("top_n", 1)))))
+
+    phase2_stress_regime_stepdown = int(cfg.get("phase2_stress_regime_stepdown", 0))
+    phase2_stress_regime_stepdown = max(0, min(2, phase2_stress_regime_stepdown))
 
     return {
         "enabled": enabled,
@@ -287,6 +295,7 @@ def _resolve_structural_cfg(params: dict) -> dict:
         "phase2_vol_mult_calm": float(cfg.get("phase2_vol_mult_calm", 1.08)),
         "phase2_vol_mult_normal": float(cfg.get("phase2_vol_mult_normal", 1.00)),
         "phase2_vol_mult_stress": float(cfg.get("phase2_vol_mult_stress", 0.78)),
+        "phase2_stress_regime_stepdown": phase2_stress_regime_stepdown,
         "phase2_recovery_enabled": bool(cfg.get("phase2_recovery_enabled", True)),
         "phase2_recovery_window": max(20, int(cfg.get("phase2_recovery_window", 180))),
         "phase2_recovery_trigger_drawdown": float(cfg.get("phase2_recovery_trigger_drawdown", -0.08)),
@@ -305,6 +314,12 @@ def _resolve_structural_cfg(params: dict) -> dict:
         "phase2_adaptive_high_dispersion_top_n_delta": int(cfg.get("phase2_adaptive_high_dispersion_top_n_delta", -1)),
         "phase2_adaptive_score_power_calm_mult": float(cfg.get("phase2_adaptive_score_power_calm_mult", 1.20)),
         "phase2_adaptive_score_power_stress_mult": float(cfg.get("phase2_adaptive_score_power_stress_mult", 0.85)),
+        "signal_strength_enabled": bool(cfg.get("signal_strength_enabled", False)),
+        "signal_strength_floor": float(cfg.get("signal_strength_floor", 0.0)),
+        "signal_strength_ref": max(1e-6, float(cfg.get("signal_strength_ref", 0.06))),
+        "signal_strength_curve": max(0.25, float(cfg.get("signal_strength_curve", 1.0))),
+        "signal_strength_min_alloc_mult": signal_strength_min_alloc_mult,
+        "signal_strength_max_alloc_mult": signal_strength_max_alloc_mult,
     }
 
 
@@ -525,6 +540,25 @@ def build_signal(
             regime_state = "risk_off"
     else:
         regime_state = "risk_on" if benchmark_trend_on else "risk_off"
+    regime_state_initial = str(regime_state)
+    phase2_pre_state = "normal"
+    phase2_pre_ratio = None
+    phase2_pre_mult = 1.0
+    phase2_stepdown_applied = False
+    if structural_enabled and bool(structural_cfg.get("phase2_enabled", False)):
+        phase2_pre_state, phase2_pre_mult, phase2_pre_ratio = _compute_vol_state_multiplier(
+            benchmark_ret=ret[benchmark_symbol],
+            i=i,
+            cfg=structural_cfg,
+        )
+        stepdown = int(structural_cfg.get("phase2_stress_regime_stepdown", 0))
+        if phase2_pre_state == "stress" and stepdown > 0:
+            if stepdown >= 2 and regime_state in {"risk_on", "neutral"}:
+                regime_state = "risk_off"
+                phase2_stepdown_applied = True
+            elif stepdown >= 1 and regime_state == "risk_on":
+                regime_state = "neutral"
+                phase2_stepdown_applied = True
 
     regime_on = bool(regime_state != "risk_off")
     if structural_enabled:
@@ -546,6 +580,9 @@ def build_signal(
         "alloc_mult": 1.0,
         "structural_enabled": bool(structural_enabled),
         "regime_state": str(regime_state),
+        "regime_state_initial": str(regime_state_initial),
+        "phase2_stress_stepdown": int(structural_cfg.get("phase2_stress_regime_stepdown", 0)),
+        "phase2_regime_stepdown_applied": bool(phase2_stepdown_applied),
         "benchmark_trend_on": bool(benchmark_trend_on),
         "benchmark_ma": benchmark_ma,
         "breadth": float(breadth),
@@ -556,13 +593,16 @@ def build_signal(
         "risk_alloc_base": float(alloc_pct),
         "risk_alloc_before_rg": float(alloc_pct),
         "phase2_enabled": bool(structural_enabled and structural_cfg.get("phase2_enabled", False)),
-        "phase2_vol_state": "normal",
-        "phase2_vol_ratio": None,
-        "phase2_vol_mult": 1.0,
+        "phase2_vol_state": str(phase2_pre_state),
+        "phase2_vol_ratio": phase2_pre_ratio,
+        "phase2_vol_mult": float(phase2_pre_mult),
         "phase2_recovery_mult": 1.0,
         "phase2_recovery_drawdown": None,
         "phase2_recovery_progress": None,
         "phase2_alloc_mult": 1.0,
+        "signal_strength_enabled": bool(structural_cfg.get("signal_strength_enabled", False)),
+        "signal_strength_value": None,
+        "signal_strength_alloc_mult": 1.0,
         "score_dispersion": 0.0,
         "top_n_effective": int(top_n),
         "score_power_effective": float(risk_on_score_power),
@@ -608,11 +648,9 @@ def build_signal(
         phase2_recovery_mult = 1.0
         phase2_recovery_meta = {}
         if structural_enabled and bool(structural_cfg.get("phase2_enabled", False)):
-            phase2_vol_state, phase2_vol_mult, phase2_vol_ratio = _compute_vol_state_multiplier(
-                benchmark_ret=ret[benchmark_symbol],
-                i=i,
-                cfg=structural_cfg,
-            )
+            phase2_vol_state = str(phase2_pre_state)
+            phase2_vol_mult = float(phase2_pre_mult)
+            phase2_vol_ratio = phase2_pre_ratio
             phase2_recovery_mult, phase2_recovery_meta = _compute_drawdown_recovery_multiplier(
                 benchmark_close=benchmark_close,
                 i=i,
@@ -643,7 +681,25 @@ def build_signal(
                 top_n_eff = min(top_n_eff, max(1, len(eligible)))
                 risk_governor_meta["score_dispersion"] = float(score_disp)
 
-        risk_alloc_pre_rg = float(risk_alloc_base * structural_alloc_mult * phase2_alloc_mult)
+        picks = sorted(eligible, key=lambda s: scores[s]["score"], reverse=True)[: max(1, top_n_eff)]
+        signal_strength_mult = 1.0
+        signal_strength_value = None
+        if bool(structural_cfg.get("signal_strength_enabled", False)) and picks:
+            strength_floor = float(structural_cfg.get("signal_strength_floor", 0.0))
+            strength_ref = max(1e-6, float(structural_cfg.get("signal_strength_ref", 0.06)))
+            strength_curve = max(0.25, float(structural_cfg.get("signal_strength_curve", 1.0)))
+            strength_vals = [
+                max(float(scores[s]["composite_momentum"]) - strength_floor, 0.0) for s in picks if s in scores
+            ]
+            if strength_vals:
+                signal_strength_value = float(sum(strength_vals) / len(strength_vals))
+                signal_strength_mult = _clamp(
+                    float((signal_strength_value / strength_ref) ** strength_curve),
+                    float(structural_cfg.get("signal_strength_min_alloc_mult", 0.70)),
+                    float(structural_cfg.get("signal_strength_max_alloc_mult", 1.10)),
+                )
+
+        risk_alloc_pre_rg = float(risk_alloc_base * structural_alloc_mult * phase2_alloc_mult * signal_strength_mult)
         alloc_mult, rg_meta = compute_risk_alloc_multiplier(
             prices=prices,
             i=i,
@@ -663,11 +719,12 @@ def build_signal(
         risk_governor_meta["phase2_recovery_drawdown"] = phase2_recovery_meta.get("drawdown")
         risk_governor_meta["phase2_recovery_progress"] = phase2_recovery_meta.get("recovery_progress")
         risk_governor_meta["phase2_alloc_mult"] = float(phase2_alloc_mult)
+        risk_governor_meta["signal_strength_value"] = signal_strength_value
+        risk_governor_meta["signal_strength_alloc_mult"] = float(signal_strength_mult)
         risk_governor_meta["top_n_effective"] = int(top_n_eff)
         risk_governor_meta["score_power_effective"] = float(score_power_eff)
 
         risk_alloc = float(risk_alloc_pre_rg * alloc_mult)
-        picks = sorted(eligible, key=lambda s: scores[s]["score"], reverse=True)[: max(1, top_n_eff)]
         risk_weights = build_risk_on_weights(
             scores=scores,
             picks=picks,
@@ -692,6 +749,8 @@ def build_signal(
         target[defensive_symbol] = alloc_pct
         if not benchmark_trend_on:
             reason = "benchmark_below_ma"
+        elif phase2_stepdown_applied and regime_state == "risk_off":
+            reason = "phase2_stress_risk_off"
         elif regime_state == "risk_off":
             reason = "breadth_risk_off"
         elif not eligible:
