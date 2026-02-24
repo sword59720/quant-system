@@ -5,7 +5,7 @@ backtest_mode: production  # production | research
 
 capital_alloc_pct: 1.00
 
-benchmark_symbol: "513100"
+benchmark_symbol: "510300"
 defensive_symbol: "518880"
 
 global_model:
