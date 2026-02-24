@@ -8,13 +8,15 @@ CRON_TZ=Asia/Shanghai
 #
 # Timezone fixed to Asia/Shanghai for A-share trading.
 
-# 1) Stock ETF cycle (workdays)
+# 1) Stock ETF cycle (workdays, manual execution mode)
 #   - 16:05 拉取收盘数据
 #   - 16:10 计算目标仓位（T日收盘）
-#   - 09:35 读取上一交易日目标并执行（T+1 开盘后）
+#   - 16:12 生成交易指令（基于本地持仓差分）
+#   - 16:13 推送交易指令到企业微信（人工在券商端执行）
 5 16 * * 1-5 cd __ROOT__ && __PYTHON__ scripts/stock_etf/fetch_stock_etf_data.py >> logs/cron_stock_fetch.log 2>&1
 10 16 * * 1-5 cd __ROOT__ && __PYTHON__ scripts/stock_etf/run_stock_etf.py >> logs/cron_stock_signal.log 2>&1
-35 9 * * 1-5 cd __ROOT__ && { __PYTHON__ scripts/stock_etf/preflight_stock_live.py --json-out ./outputs/reports/stock_live_preflight_latest.json && __PYTHON__ scripts/stock_etf/trade_stock_etf.py --skip-fetch --skip-calc --yes; } >> logs/cron_stock_execute.log 2>&1
+12 16 * * 1-5 cd __ROOT__ && __PYTHON__ scripts/stock_etf/generate_trades_stock_etf.py >> logs/cron_stock_trade_gen.log 2>&1
+13 16 * * 1-5 cd __ROOT__ && __PYTHON__ scripts/stock_etf/notify_stock_trades_wecom.py >> logs/cron_stock_trade_notify.log 2>&1
 
 # Optional: Single-stock cycle (enable when config/stock_single.yaml enabled=true)
 # 5 15 * * 1-5 cd __ROOT__ && __PYTHON__ scripts/stock_single/fetch_stock_single_data.py >> logs/cron_stock_single_fetch.log 2>&1

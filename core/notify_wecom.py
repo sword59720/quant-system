@@ -57,6 +57,7 @@ def send_wecom_message(
     api_token = bridge.get("api_token", "").strip()
     sign_secret = bridge.get("sign_secret", "").strip()
     timeout_sec = int(bridge.get("timeout_sec", 10))
+    use_env_proxy = bool(bridge.get("use_env_proxy", False))
 
     if not all([endpoint, to_user, api_token, sign_secret]):
         return False, "notify config incomplete"
@@ -91,7 +92,9 @@ def send_wecom_message(
     }
 
     try:
-        r = requests.post(endpoint, data=body.encode("utf-8"), headers=headers, timeout=timeout_sec)
+        with requests.Session() as s:
+            s.trust_env = use_env_proxy
+            r = s.post(endpoint, data=body.encode("utf-8"), headers=headers, timeout=timeout_sec)
         if r.status_code != 200:
             return False, f"http {r.status_code}: {r.text[:200]}"
         obj = r.json()

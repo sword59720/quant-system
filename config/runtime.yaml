@@ -26,3 +26,11 @@ execution_quality_alert:
     reject_rate_max: 0.05
     p95_execution_latency_ms_max: 2000
     p95_abs_slippage_bps_max: 20
+
+stock_trade_notify:
+  enabled: true
+  trades_file: ./outputs/orders/stock_trades.json
+  title: 股票交易指令
+  send_empty: false
+  dedup_hours: 12
+  stale_position_hours: 36

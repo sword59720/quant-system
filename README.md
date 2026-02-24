@@ -133,16 +133,16 @@ cd /home/haojc/.openclaw/workspace/quant-system
 
 > 说明：ETF 数据/信号/研究脚本统一位于 `scripts/stock_etf/`。
 
-按“收盘算信号 + 开盘执行”实盘链路手动执行：
+按“收盘算信号 + 推送交易指令到企业微信”执行：
 
 ```bash
 # 收盘后（T日）
 ./.venv/bin/python scripts/stock_etf/fetch_stock_etf_data.py
 ./.venv/bin/python scripts/stock_etf/run_stock_etf.py
 
-# 次日开盘后（T+1）
-./.venv/bin/python scripts/stock_etf/preflight_stock_live.py --json-out ./outputs/reports/stock_live_preflight_latest.json
-./.venv/bin/python scripts/stock_etf/trade_stock_etf.py --skip-fetch --skip-calc --yes
+# 收盘后生成交易指令并发送企业微信
+./.venv/bin/python scripts/stock_etf/generate_trades_stock_etf.py
+./.venv/bin/python scripts/stock_etf/notify_stock_trades_wecom.py
 ```
 
 ## 4.2 个股模型（构建股票池 + 小时信号，默认关闭）
@@ -270,14 +270,13 @@ cd /home/haojc/.openclaw/workspace/quant-system
 
 - 股票数据：工作日 16:05
 - 股票信号：工作日 16:10
-- 股票执行前检查：工作日 09:35（`preflight_stock_live.py`）
-- 股票自动执行：工作日 09:35（通过 `trade_stock_etf.py --skip-fetch --skip-calc --yes`）
+- 股票交易指令生成：工作日 16:12（`generate_trades_stock_etf.py`）
+- 股票交易指令推送：工作日 16:13（`notify_stock_trades_wecom.py`，企业微信）
 - 个股数据：工作日 15:05
 - 个股建池：工作日 15:15
 - 个股小时信号：09:45 / 10:45 / 11:15 / 13:45 / 14:45
 - 个股快风控：交易时段每 5 分钟
 - 币圈数据：每4小时第5分钟（执行前 `source setenv.sh`）
-- 币圈信号：每4小时第7分钟（执行前 `source setenv.sh`）
 - 重型验证：每周六 17:30（`backtest_stock_etf`）+ 17:40（`backtest_crypto`）+ 17:50（`backtest_stock_etf_cpcv`）
 - 健康告警：每天 13:10
 
@@ -350,7 +349,8 @@ cat outputs/reports/healthcheck_latest.log
 
 ```bash
 tail -n 100 logs/cron_stock_signal.log
-tail -n 100 logs/cron_stock_execute.log
+tail -n 100 logs/cron_stock_trade_gen.log
+tail -n 100 logs/cron_stock_trade_notify.log
 tail -n 100 logs/cron_crypto.log
 tail -n 100 logs/cron_health.log
 ```
