@@ -96,6 +96,45 @@ def fetch_with_akshare_sina(symbol: str, start_date: str, end_date: str) -> pd.D
     return df.reset_index(drop=True)
 
 
+def fetch_with_baostock(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    import baostock as bs
+
+    if symbol.startswith(("0", "1", "2", "3")):
+        code = f"sz.{symbol}"
+    else:
+        code = f"sh.{symbol}"
+
+    lg = bs.login()
+    if lg.error_code != "0":
+        raise RuntimeError(f"baostock login failed: {lg.error_msg}")
+
+    try:
+        rs = bs.query_history_k_data_plus(
+            code,
+            "date,open,high,low,close,volume,amount",
+            start_date=datetime.strptime(start_date, "%Y%m%d").strftime("%Y-%m-%d"),
+            end_date=datetime.strptime(end_date, "%Y%m%d").strftime("%Y-%m-%d"),
+            frequency="d",
+            adjustflag="2",  # 前复权，对齐 akshare qfq
+        )
+        if rs.error_code != "0":
+            raise RuntimeError(f"baostock query failed: {rs.error_msg}")
+
+        rows = []
+        while rs.next():
+            rows.append(rs.get_row_data())
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows, columns=rs.fields)
+        return _normalize_ohlc_df(df)
+    finally:
+        try:
+            bs.logout()
+        except Exception:
+            pass
+
+
 def has_valid_cache(path: str, min_rows: int = 200, max_age_days: int = 15) -> bool:
     if not os.path.exists(path):
         return False
@@ -174,23 +213,46 @@ def main():
     for s in symbols:
         out = os.path.join(data_dir, f"{s}.csv")
         try:
+            bs_err = None
             em_err = None
+            sina_err = None
             try:
-                df = fetch_with_akshare_em(s, start_date=start_date, end_date=end_date)
-                source = "eastmoney"
+                df = fetch_with_baostock(s, start_date=start_date, end_date=end_date)
+                source = "baostock"
             except Exception as e:
-                em_err = e
+                bs_err = e
                 df = pd.DataFrame()
-                source = "eastmoney"
+                source = "baostock"
 
             if df.empty:
-                df = fetch_with_akshare_sina(s, start_date=start_date, end_date=end_date)
-                source = "sina"
+                try:
+                    df = fetch_with_akshare_em(s, start_date=start_date, end_date=end_date)
+                    source = "eastmoney"
+                except Exception as e:
+                    em_err = e
+                    df = pd.DataFrame()
+                    source = "eastmoney"
 
             if df.empty:
+                try:
+                    df = fetch_with_akshare_sina(s, start_date=start_date, end_date=end_date)
+                    source = "sina"
+                except Exception as e:
+                    sina_err = e
+                    df = pd.DataFrame()
+                    source = "sina"
+
+            if df.empty:
+                errs = []
+                if bs_err is not None:
+                    errs.append(f"baostock={bs_err}")
                 if em_err is not None:
-                    raise RuntimeError(f"both sources empty/failed, em_err={em_err}")
-                raise RuntimeError("both sources empty")
+                    errs.append(f"eastmoney={em_err}")
+                if sina_err is not None:
+                    errs.append(f"sina={sina_err}")
+                if errs:
+                    raise RuntimeError("all sources empty/failed, " + "; ".join(errs))
+                raise RuntimeError("all sources empty")
 
             old_rows = 0
             if os.path.exists(out):
