@@ -224,6 +224,11 @@ def main():
                 df = pd.DataFrame()
                 source = "baostock"
 
+            # Baostock 在部分环境下仅返回极短近端 ETF 历史；ETF 数据抓取统一要求最小行数，不足则回退。
+            if (not df.empty) and (len(df) < min_rows):
+                bs_err = RuntimeError(f"baostock rows too short: {len(df)} < min_rows({min_rows})")
+                df = pd.DataFrame()
+
             if df.empty:
                 try:
                     df = fetch_with_akshare_em(s, start_date=start_date, end_date=end_date)
