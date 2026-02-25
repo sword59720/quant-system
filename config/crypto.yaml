@@ -39,6 +39,8 @@ network:
   # env: 仅使用环境代理；direct: 仅直连（忽略 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY）
   http_proxy_mode: auto
   proxy_auto_bypass_on_error: true
+  # requests.Session.trust_env 开关：true=读取环境代理；false=忽略环境代理
+  trust_env_enabled: true
 
 execution:
   # 仅在 runtime.env=live 时生效：策略出目标后自动生成并执行下单

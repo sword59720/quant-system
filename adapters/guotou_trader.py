@@ -111,10 +111,11 @@ class GuotouPaperTrader(BaseTrader):
         self.is_connected = False
     
     def get_account_info(self) -> Dict:
+        total_capital = float(self.config.get("total_capital", 20000.0) or 20000.0)
         return {
             "account_id": "PAPER_ACCOUNT",
-            "available_cash": 20000.0,
-            "total_asset": 20000.0,
+            "available_cash": total_capital,
+            "total_asset": total_capital,
         }
     
     def get_positions(self) -> List[Dict]:

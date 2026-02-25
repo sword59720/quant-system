@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -115,6 +116,32 @@ def _position_hint(position_file: str, stale_hours: int) -> Tuple[List[str], boo
     return lines, stale
 
 
+def _fmt_positions(title: str, positions: List[Dict[str, Any]]) -> List[str]:
+    lines = [title]
+    if not positions:
+        lines.append("  (空仓)")
+        return lines
+    for p in positions:
+        sym = str(p.get("symbol", "")).strip()
+        w = p.get("weight")
+        if w is None:
+            lines.append(f"  - {sym}")
+        else:
+            lines.append(f"  - {sym} weight={safe_float(w):.4f}")
+    return lines
+
+
+def _load_latest_execution_record() -> Dict[str, Any]:
+    files = glob.glob("./outputs/orders/execution_record_*.json")
+    if not files:
+        return {}
+    latest = max(files, key=os.path.getmtime)
+    try:
+        return load_json(latest)
+    except Exception:
+        return {}
+
+
 def build_trade_message(trades: Dict[str, Any], stale_position_hours: int = 36) -> str:
     ts = str(trades.get("ts", "")).strip() or datetime.now().isoformat()
     capital_total = safe_float(trades.get("capital_total"))
@@ -129,19 +156,36 @@ def build_trade_message(trades: Dict[str, Any], stale_position_hours: int = 36) 
         f"指令数: {len(orders)}",
     ]
 
-    if orders:
+    # 优先使用最新 execution_record（含交易前后仓位、数量、价格）
+    rec = _load_latest_execution_record()
+    if rec:
+        lines.append("")
+        lines.extend(_fmt_positions("交易前仓位:", rec.get("positions_before", []) or []))
         lines.append("交易指令:")
-        for idx, order in enumerate(orders, 1):
-            symbol = str(order.get("symbol", "")).strip()
-            action = str(order.get("action", "BUY")).strip().upper()
-            amount = safe_float(order.get("amount_quote"))
-            delta_weight_val = order.get("delta_weight")
-            delta_weight = None if delta_weight_val is None else safe_float(delta_weight_val, 0.0)
-            lines.append(
-                f"{idx}. {action:<4} {symbol} 金额¥{amount:,.2f}  Δ仓位{_fmt_weight_delta(delta_weight)}"
-            )
+        rows = rec.get("order_results", []) or []
+        if not rows:
+            lines.append("  (无)")
+        else:
+            for i, r in enumerate(rows, 1):
+                lines.append(
+                    f"{i}. {str(r.get('action','')).upper():<4} {str(r.get('symbol','')).strip()} "
+                    f"数量={r.get('quantity','N/A')} 价格={r.get('order_price','N/A')} 金额¥{safe_float(r.get('amount_quote')):,.2f}"
+                )
+        lines.extend(_fmt_positions("交易后仓位:", rec.get("positions_after", []) or []))
     else:
-        lines.append("今日无调仓指令（维持当前仓位）。")
+        if orders:
+            lines.append("交易指令:")
+            for idx, order in enumerate(orders, 1):
+                symbol = str(order.get("symbol", "")).strip()
+                action = str(order.get("action", "BUY")).strip().upper()
+                amount = safe_float(order.get("amount_quote"))
+                delta_weight_val = order.get("delta_weight")
+                delta_weight = None if delta_weight_val is None else safe_float(delta_weight_val, 0.0)
+                lines.append(
+                    f"{idx}. {action:<4} {symbol} 金额¥{amount:,.2f}  Δ仓位{_fmt_weight_delta(delta_weight)}"
+                )
+        else:
+            lines.append("今日无调仓指令（维持当前仓位）。")
 
     pos_lines, _ = _position_hint(position_file, stale_hours=stale_position_hours)
     lines.append("")

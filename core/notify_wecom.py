@@ -5,10 +5,12 @@ import os
 import time
 import hmac
 import json
+import socket
 import hashlib
 import secrets
 import requests
 import yaml
+from urllib.parse import urlparse
 from datetime import datetime
 from typing import Optional
 
@@ -35,6 +37,29 @@ def _save_dedup_state(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _check_proxy_reachable(timeout_sec: int = 3):
+    proxy = (
+        os.environ.get("ALL_PROXY")
+        or os.environ.get("HTTPS_PROXY")
+        or os.environ.get("HTTP_PROXY")
+        or os.environ.get("all_proxy")
+        or os.environ.get("https_proxy")
+        or os.environ.get("http_proxy")
+    )
+    if not proxy:
+        return False, "proxy env missing"
+    try:
+        u = urlparse(proxy)
+        host = u.hostname
+        port = int(u.port or (443 if (u.scheme or "").endswith("s") else 80))
+        if not host:
+            return False, f"invalid proxy url: {proxy}"
+        with socket.create_connection((host, port), timeout=timeout_sec):
+            return True, f"proxy reachable: {host}:{port}"
+    except Exception as e:
+        return False, f"proxy unreachable: {e}"
 
 
 def send_wecom_message(
@@ -91,16 +116,12 @@ def send_wecom_message(
         "x-bridge-signature": sig,
     }
 
-    try:
+    def _post_once(trust_env_flag: bool):
         with requests.Session() as s:
-            s.trust_env = use_env_proxy
-            r = s.post(endpoint, data=body.encode("utf-8"), headers=headers, timeout=timeout_sec)
-        if r.status_code != 200:
-            return False, f"http {r.status_code}: {r.text[:200]}"
-        obj = r.json()
-        if not obj.get("ok", False):
-            return False, f"bridge error: {obj}"
+            s.trust_env = trust_env_flag
+            return s.post(endpoint, data=body.encode("utf-8"), headers=headers, timeout=timeout_sec)
 
+    def _save_dedup_if_needed():
         if dedup_key and dedup_hours > 0:
             dedup_file = os.path.join(_project_root(), "outputs", "state", "wecom_dedup_state.json")
             state = _load_dedup_state(dedup_file)
@@ -108,6 +129,35 @@ def send_wecom_message(
             state[f"{dedup_key}__updated_at"] = datetime.now().isoformat()
             _save_dedup_state(dedup_file, state)
 
-        return True, "ok"
-    except Exception as e:
-        return False, str(e)
+    def _attempt_send(trust_env_flag: bool):
+        try:
+            r = _post_once(trust_env_flag)
+            if r.status_code != 200:
+                return False, f"http {r.status_code}: {r.text[:200]}"
+            obj = r.json()
+            if not obj.get("ok", False):
+                return False, f"bridge error: {obj}"
+            return True, "ok"
+        except Exception as e:
+            return False, str(e)
+
+    # 第1次发送：按配置执行（要求 use_env_proxy=true）
+    ok, detail = _attempt_send(use_env_proxy)
+    if ok:
+        _save_dedup_if_needed()
+        return True, detail
+
+    # 失败后：先检查代理，再进行第2/第3次重试（强制使用环境代理）
+    ok_proxy, proxy_msg = _check_proxy_reachable(timeout_sec=min(timeout_sec, 3))
+    if not ok_proxy:
+        return False, f"first_fail={detail}; proxy_check={proxy_msg}"
+
+    last_detail = detail
+    for idx in [2, 3]:
+        ok_retry, detail_retry = _attempt_send(True)
+        if ok_retry:
+            _save_dedup_if_needed()
+            return True, f"ok(retry#{idx}; {proxy_msg})"
+        last_detail = detail_retry
+
+    return False, f"first_fail={detail}; retry_fail={last_detail}; {proxy_msg}"

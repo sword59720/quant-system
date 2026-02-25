@@ -109,6 +109,7 @@ def http_get_with_proxy_policy(
     timeout: int,
     proxy_mode: str = "auto",
     proxy_auto_bypass_on_error: bool = True,
+    trust_env_enabled: bool = True,
 ):
     mode = str(proxy_mode or "auto").strip().lower()
     if mode not in {"auto", "env", "direct"}:
@@ -116,7 +117,7 @@ def http_get_with_proxy_policy(
 
     if mode == "direct":
         sess = requests.Session()
-        sess.trust_env = False
+        sess.trust_env = bool(trust_env_enabled)
         try:
             return sess.get(url, params=params, timeout=timeout)
         finally:
@@ -128,7 +129,7 @@ def http_get_with_proxy_policy(
         if not (mode == "auto" and proxy_auto_bypass_on_error and is_proxy_connection_error(e)):
             raise
         sess = requests.Session()
-        sess.trust_env = False
+        sess.trust_env = bool(trust_env_enabled)
         try:
             return sess.get(url, params=params, timeout=timeout)
         finally:
@@ -143,6 +144,7 @@ def fetch_htx_klines(
     base_url: str = "https://api.huobi.pro/market/history/kline",
     proxy_mode: str = "auto",
     proxy_auto_bypass_on_error: bool = True,
+    trust_env_enabled: bool = True,
     timezone_name: str = "Asia/Shanghai",
 ) -> pd.DataFrame:
     period = "4hour" if timeframe == "4h" else "60min"
@@ -153,6 +155,7 @@ def fetch_htx_klines(
         timeout=timeout,
         proxy_mode=proxy_mode,
         proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
+        trust_env_enabled=trust_env_enabled,
     )
     r.raise_for_status()
     data = r.json()
@@ -189,6 +192,7 @@ def fetch_htx_klines_page_with_id(
     base_url: str = "https://api.huobi.pro/market/history/kline",
     proxy_mode: str = "auto",
     proxy_auto_bypass_on_error: bool = True,
+    trust_env_enabled: bool = True,
     timezone_name: str = "Asia/Shanghai",
     to_ts: int = None,
 ) -> pd.DataFrame:
@@ -203,6 +207,7 @@ def fetch_htx_klines_page_with_id(
         timeout=timeout,
         proxy_mode=proxy_mode,
         proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
+        trust_env_enabled=trust_env_enabled,
     )
     r.raise_for_status()
     data = r.json()
@@ -236,6 +241,7 @@ def fetch_htx_klines_history(
     base_url: str = "https://api.huobi.pro/market/history/kline",
     proxy_mode: str = "auto",
     proxy_auto_bypass_on_error: bool = True,
+    trust_env_enabled: bool = True,
     timezone_name: str = "Asia/Shanghai",
 ) -> pd.DataFrame:
     if max_bars <= 0:
@@ -256,6 +262,7 @@ def fetch_htx_klines_history(
             base_url=base_url,
             proxy_mode=proxy_mode,
             proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
+            trust_env_enabled=trust_env_enabled,
             timezone_name=timezone_name,
             to_ts=cursor_to,
         )
@@ -307,6 +314,7 @@ def fetch_okx_klines_history(
     base_url: str = "https://www.okx.com/api/v5/market/history-candles",
     proxy_mode: str = "auto",
     proxy_auto_bypass_on_error: bool = True,
+    trust_env_enabled: bool = True,
     timezone_name: str = "Asia/Shanghai",
     max_retries: int = 3,
 ) -> pd.DataFrame:
@@ -340,6 +348,7 @@ def fetch_okx_klines_history(
                     timeout=timeout,
                     proxy_mode=proxy_mode,
                     proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
+                    trust_env_enabled=trust_env_enabled,
                 )
                 r.raise_for_status()
                 data = r.json()
@@ -564,6 +573,12 @@ def main():
         default=2000,
         help="HTX page size per request, max 2000",
     )
+    parser.add_argument(
+        "--trust-env",
+        choices=["true", "false"],
+        default=None,
+        help="override network.trust_env_enabled (default from config, usually true)",
+    )
     args = parser.parse_args()
 
     try:
@@ -602,6 +617,9 @@ def main():
     if proxy_mode not in {"auto", "env", "direct"}:
         proxy_mode = "auto"
     proxy_auto_bypass_on_error = bool(network_cfg.get("proxy_auto_bypass_on_error", True))
+    trust_env_enabled = bool(network_cfg.get("trust_env_enabled", True))
+    if args.trust_env is not None:
+        trust_env_enabled = (str(args.trust_env).lower() == "true")
     max_bars = max(200, int(args.max_bars))
     page_size = max(50, min(2000, int(args.page_size)))
     history_start_ts = parse_start_ts_seconds(args.history_start)
@@ -648,6 +666,7 @@ def main():
                                     base_url=base_url,
                                     proxy_mode=proxy_mode,
                                     proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
+                                    trust_env_enabled=trust_env_enabled,
                                     timezone_name=timezone_name,
                                 )
                             else:
@@ -659,6 +678,7 @@ def main():
                                     base_url=base_url,
                                     proxy_mode=proxy_mode,
                                     proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
+                                    trust_env_enabled=trust_env_enabled,
                                     timezone_name=timezone_name,
                                 )
                             if not df.empty:
@@ -683,6 +703,7 @@ def main():
                             base_url=okx_history_url,
                             proxy_mode=proxy_mode,
                             proxy_auto_bypass_on_error=proxy_auto_bypass_on_error,
+                            trust_env_enabled=trust_env_enabled,
                             timezone_name=timezone_name,
                             max_retries=3,
                         )

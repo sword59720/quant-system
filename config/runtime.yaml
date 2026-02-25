@@ -8,7 +8,7 @@ stock_brokers:
   stock_single: guotou
 timezone: Asia/Shanghai
 base_currency: CNY
-total_capital: 40
+total_capital: 100000
 
 paths:
   data_dir: ./data

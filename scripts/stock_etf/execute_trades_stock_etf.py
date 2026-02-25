@@ -57,6 +57,49 @@ def load_trades(file_path: str) -> dict:
         return json.load(f)
 
 
+def _load_positions_snapshot(path: str = "./outputs/state/stock_positions.json") -> list:
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+        pos = data.get("positions", [])
+        return pos if isinstance(pos, list) else []
+    except Exception:
+        return []
+
+
+def _positions_to_weight_map(positions: list) -> dict:
+    out = {}
+    for p in positions or []:
+        if not isinstance(p, dict):
+            continue
+        sym = str(p.get("symbol", "")).strip()
+        if not sym:
+            continue
+        try:
+            w = float(p.get("weight", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            w = 0.0
+        out[sym] = out.get(sym, 0.0) + w
+    return out
+
+
+def _apply_filled_orders_to_positions(before_positions: list, order_results: list) -> list:
+    after_map = _positions_to_weight_map(before_positions)
+    for x in order_results or []:
+        if str(x.get("status", "")).lower() not in {"filled", "submitted", "partial_filled"}:
+            continue
+        sym = str(x.get("symbol", "")).strip()
+        if not sym:
+            continue
+        dw = float(x.get("delta_weight", 0.0) or 0.0)
+        after_map[sym] = after_map.get(sym, 0.0) + dw
+        if abs(after_map[sym]) < 1e-8:
+            after_map.pop(sym, None)
+    return [{"symbol": k, "weight": round(float(v), 6)} for k, v in sorted(after_map.items()) if abs(v) > 1e-8]
+
+
 def load_config(*, force_paper: bool = False) -> dict:
     import yaml
 
@@ -189,6 +232,15 @@ def _calc_slippage_bps(action: str, ref_price, fill_price):
     return float(raw_bps * side)
 
 
+def _estimate_quantity(amount_quote, price, lot_size: int = 100):
+    amt = _safe_float(amount_quote)
+    px = _safe_float(price)
+    if amt is None or px is None or px <= 0:
+        return None
+    lots = int(amt // (px * lot_size))
+    return int(max(0, lots) * lot_size)
+
+
 def _build_execution_metrics(order_results: list):
     status_count = {}
     for x in order_results:
@@ -299,6 +351,8 @@ def execute_trades(trades_file: str, dry_run: bool = False):
             return True
 
         logger.info(f"📋 发现 {len(orders)} 条交易指令")
+        before_positions = _load_positions_snapshot("./outputs/state/stock_positions.json")
+        before_weight_map = _positions_to_weight_map(before_positions)
         try:
             account = trader.get_account_info()
             logger.info(f"💰 账户可用资金: ¥{account.get('available_cash', 0):.2f}")
@@ -314,6 +368,7 @@ def execute_trades(trades_file: str, dry_run: bool = False):
             symbol = trade.get("symbol")
             action = trade.get("action")
             amount = float(trade.get("amount_quote", 0) or 0)
+            delta_weight = float(trade.get("delta_weight", 0) or 0)
 
             logger.info(f"\n[{i}/{len(orders)}] 处理交易: {action} {symbol} ¥{amount:.2f}")
             requested_at = datetime.now().isoformat()
@@ -330,13 +385,17 @@ def execute_trades(trades_file: str, dry_run: bool = False):
                         "symbol": symbol,
                         "action": action,
                         "amount_quote": amount,
+                        "delta_weight": delta_weight,
                         "status": "error",
                         "order_id": None,
                         "requested_at": requested_at,
                         "finished_at": datetime.now().isoformat(),
                         "latency_ms": None,
                         "reference_price": ref_px,
+                        "order_price": ref_px,
                         "filled_price": None,
+                        "quantity": _estimate_quantity(amount, ref_px, lot_size=100),
+                        "lot_size": 100,
                         "slippage_bps": None,
                         "error_msg": str(e),
                     }
@@ -357,13 +416,17 @@ def execute_trades(trades_file: str, dry_run: bool = False):
                         "symbol": symbol,
                         "action": action,
                         "amount_quote": amount,
+                        "delta_weight": delta_weight,
                         "status": "error",
                         "order_id": None,
                         "requested_at": requested_at,
                         "finished_at": datetime.now().isoformat(),
                         "latency_ms": round(float(latency_ms), 3),
                         "reference_price": ref_px,
+                        "order_price": ref_px,
                         "filled_price": None,
+                        "quantity": _estimate_quantity(amount, ref_px, lot_size=100),
+                        "lot_size": 100,
                         "slippage_bps": None,
                         "error_msg": str(e),
                     }
@@ -374,18 +437,24 @@ def execute_trades(trades_file: str, dry_run: bool = False):
             latency_ms = (time.time() - place_start) * 1000.0
             status = _status_value(result)
             fill_px = _safe_float(getattr(result, "price", None))
+            order_price = fill_px if fill_px is not None else ref_px
+            est_qty = _estimate_quantity(amount, order_price, lot_size=100)
             slippage_bps = _calc_slippage_bps(action, ref_px, fill_px)
             row = {
                 "symbol": symbol,
                 "action": action,
                 "amount_quote": amount,
+                "delta_weight": delta_weight,
                 "status": status,
                 "order_id": getattr(result, "order_id", None),
                 "requested_at": requested_at,
                 "finished_at": datetime.now().isoformat(),
                 "latency_ms": round(float(latency_ms), 3),
                 "reference_price": ref_px,
+                "order_price": order_price,
                 "filled_price": fill_px,
+                "quantity": est_qty,
+                "lot_size": 100,
                 "slippage_bps": slippage_bps,
                 "filled_amount": _safe_float(getattr(result, "filled_amount", None)),
                 "error_msg": str(getattr(result, "error_msg", "") or "").strip(),
@@ -398,6 +467,9 @@ def execute_trades(trades_file: str, dry_run: bool = False):
                         "symbol": symbol,
                         "action": action,
                         "amount": amount,
+                        "delta_weight": delta_weight,
+                        "quantity": row.get("quantity"),
+                        "order_price": row.get("order_price"),
                         "order_id": row["order_id"],
                         "status": status,
                         "latency_ms": row["latency_ms"],
@@ -426,10 +498,19 @@ def execute_trades(trades_file: str, dry_run: bool = False):
 
         pos_file = "./outputs/state/stock_positions.json"
         try:
-            trader.sync_positions(pos_file)
-            logger.info(f"\n💾 持仓已同步到: {pos_file}")
+            if dry_run:
+                # 需求：dry-run 完成后视为交易成功并更新仓位
+                after_positions = _apply_filled_orders_to_positions(before_positions, order_results)
+                with open(pos_file, "w", encoding="utf-8") as f:
+                    json.dump({"positions": after_positions}, f, ensure_ascii=False, indent=2)
+                logger.info(f"\n💾 [DRY-RUN] 已按成交结果更新仓位到: {pos_file}")
+            else:
+                trader.sync_positions(pos_file)
+                logger.info(f"\n💾 持仓已同步到: {pos_file}")
+                after_positions = _load_positions_snapshot(pos_file)
         except Exception as e:
             logger.warning(f"⚠️ 同步持仓失败: {e}")
+            after_positions = _apply_filled_orders_to_positions(before_positions, order_results)
 
         logger.info("\n" + "=" * 60)
         logger.info("执行结果统计")
@@ -446,6 +527,8 @@ def execute_trades(trades_file: str, dry_run: bool = False):
             "total_orders": len(orders),
             "success": len(executed_orders),
             "failed": len(failed_orders),
+            "positions_before": before_positions,
+            "positions_after": after_positions,
             "executed": executed_orders,
             "failed_details": failed_orders,
             "order_results": order_results,
@@ -480,12 +563,56 @@ def main():
         print(f"文件: {args.file}")
         print(f"总资金: ¥{trades.get('capital_total', 0):.2f}")
 
+        before_positions = _load_positions_snapshot("./outputs/state/stock_positions.json")
+        print("交易前仓位:")
+        if not before_positions:
+            print("  (空仓)")
+        else:
+            for p in before_positions:
+                sym = p.get("symbol", "")
+                w = p.get("weight", None)
+                qty = p.get("quantity", None)
+                if w is not None:
+                    print(f"  - {sym} weight={float(w):.4f}" + (f" qty={qty}" if qty is not None else ""))
+                else:
+                    print(f"  - {sym}" + (f" qty={qty}" if qty is not None else ""))
+
         orders = trades.get("orders", [])
+        print("交易指令:")
         if not orders:
             print("  (无)")
         else:
+            data_dir = "./data/stock"
             for i, order in enumerate(orders, 1):
-                print(f"  {i}. {order['action']:4} {order['symbol']}  金额: ¥{order.get('amount_quote', 0):,.2f}")
+                symbol = order.get("symbol", "")
+                amount = float(order.get("amount_quote", 0) or 0)
+                action = str(order.get("action", "")).upper()
+                px = _load_latest_close(os.path.join(data_dir, f"{symbol}.csv"))
+                qty = _estimate_quantity(amount, px, lot_size=100)
+                px_str = f"¥{px:.4f}" if px is not None else "N/A"
+                qty_str = str(qty) if qty is not None else "N/A"
+                print(
+                    f"  {i}. {action:4} {symbol} 金额: ¥{amount:,.2f} 数量(估): {qty_str} 价格(参考): {px_str}"
+                )
+
+        # 预估交易后仓位（按 delta_weight 推演）
+        before_map = _positions_to_weight_map(before_positions)
+        after_map = dict(before_map)
+        for order in orders:
+            sym = str(order.get("symbol", "")).strip()
+            if not sym:
+                continue
+            dw = float(order.get("delta_weight", 0.0) or 0.0)
+            after_map[sym] = after_map.get(sym, 0.0) + dw
+            if abs(after_map[sym]) < 1e-8:
+                after_map.pop(sym, None)
+        print("交易后仓位(预估):")
+        if not after_map:
+            print("  (空仓)")
+        else:
+            for sym, w in sorted(after_map.items()):
+                print(f"  - {sym} weight={float(w):.4f}")
+
         print("=" * 60)
 
         if not args.yes and not args.dry_run:
