@@ -3,6 +3,7 @@
 
 import os
 import sys
+import argparse
 import yaml
 import pandas as pd
 from datetime import datetime, timedelta
@@ -25,7 +26,23 @@ def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
 
 
-def fetch_with_akshare(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+def _normalize_ohlc_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    keep_cols = [c for c in ["date", "open", "high", "low", "close", "volume", "amount"] if c in df.columns]
+    if "date" not in keep_cols or "close" not in keep_cols:
+        return pd.DataFrame()
+    out = df[keep_cols].copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    out = out.dropna(subset=["date"]).sort_values("date").drop_duplicates(subset=["date"], keep="last")
+    for c in ["open", "high", "low", "close", "volume", "amount"]:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+    out = out.dropna(subset=["close"]).reset_index(drop=True)
+    return out
+
+
+def fetch_with_akshare_em(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     import akshare as ak
 
     df = ak.fund_etf_hist_em(
@@ -49,11 +66,34 @@ def fetch_with_akshare(symbol: str, start_date: str, end_date: str) -> pd.DataFr
         "成交额": "amount",
     }
     df = df.rename(columns=col_map)
-    keep_cols = [c for c in ["date", "open", "high", "low", "close", "volume", "amount"] if c in df.columns]
-    df = df[keep_cols].copy()
-    df["date"] = pd.to_datetime(df["date"]) 
-    df = df.sort_values("date").reset_index(drop=True)
-    return df
+    return _normalize_ohlc_df(df)
+
+
+def fetch_with_akshare_sina(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    import akshare as ak
+
+    # fund_etf_hist_sina 需要带市场前缀的代码
+    if symbol.startswith(("0", "1", "2", "3")):
+        code = f"sz{symbol}"
+    else:
+        code = f"sh{symbol}"
+
+    df = ak.fund_etf_hist_sina(symbol=code)
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = _normalize_ohlc_df(df)
+    if df.empty:
+        return df
+
+    # 与 EM 路径保持一致，按请求区间裁剪
+    s = pd.to_datetime(start_date, format="%Y%m%d", errors="coerce")
+    e = pd.to_datetime(end_date, format="%Y%m%d", errors="coerce")
+    if pd.notna(s):
+        df = df[df["date"] >= s]
+    if pd.notna(e):
+        df = df[df["date"] <= e]
+    return df.reset_index(drop=True)
 
 
 def has_valid_cache(path: str, min_rows: int = 200, max_age_days: int = 15) -> bool:
@@ -74,7 +114,34 @@ def has_valid_cache(path: str, min_rows: int = 200, max_age_days: int = 15) -> b
     return age_days <= max_age_days
 
 
+def disable_proxy_env() -> None:
+    # 仅对当前进程生效：临时禁用代理，避免影响 openclaw 主进程
+    for key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "UNDICI_PROXY",
+    ]:
+        os.environ.pop(key, None)
+    os.environ["NO_PROXY"] = "*"
+    os.environ["no_proxy"] = "*"
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="temporarily disable proxy env vars for this fetch process only",
+    )
+    args = parser.parse_args()
+
+    if args.no_proxy:
+        disable_proxy_env()
+
     try:
         runtime = load_yaml("config/runtime.yaml")
         stock_cfg = load_yaml("config/stock.yaml")
@@ -86,12 +153,15 @@ def main():
         print("[system] disabled by config/runtime.yaml: enabled=false")
         return EXIT_DISABLED
 
-    symbols = stock_cfg.get("universe", [])
+    benchmark_symbol = stock_cfg.get("benchmark_symbol", "510300")
+    defensive_symbol = stock_cfg.get("defensive_symbol", "518880")
+    symbols = sorted(set((stock_cfg.get("universe", []) or []) + [benchmark_symbol, defensive_symbol]))
     data_dir = os.path.join(runtime["paths"]["data_dir"], "stock")
     ensure_dir(data_dir)
 
     end = datetime.now().date()
-    start = end - timedelta(days=365 * 8)
+    # 保留更长历史，避免覆盖后导致老回测区间（如 2015 起）数据不足
+    start = end - timedelta(days=365 * 15)
     start_date = start.strftime("%Y%m%d")
     end_date = end.strftime("%Y%m%d")
 
@@ -104,11 +174,41 @@ def main():
     for s in symbols:
         out = os.path.join(data_dir, f"{s}.csv")
         try:
-            df = fetch_with_akshare(s, start_date=start_date, end_date=end_date)
+            em_err = None
+            try:
+                df = fetch_with_akshare_em(s, start_date=start_date, end_date=end_date)
+                source = "eastmoney"
+            except Exception as e:
+                em_err = e
+                df = pd.DataFrame()
+                source = "eastmoney"
+
             if df.empty:
-                raise RuntimeError("empty data")
+                df = fetch_with_akshare_sina(s, start_date=start_date, end_date=end_date)
+                source = "sina"
+
+            if df.empty:
+                if em_err is not None:
+                    raise RuntimeError(f"both sources empty/failed, em_err={em_err}")
+                raise RuntimeError("both sources empty")
+
+            old_rows = 0
+            if os.path.exists(out):
+                try:
+                    old_df = pd.read_csv(out)
+                    old_df = _normalize_ohlc_df(old_df)
+                    old_rows = len(old_df)
+                    if not old_df.empty:
+                        df = pd.concat([old_df, df], ignore_index=True)
+                        df = _normalize_ohlc_df(df)
+                except Exception:
+                    pass
+
             df.to_csv(out, index=False, encoding="utf-8")
-            print(f"[stock-data] {s} -> {out} rows={len(df)}")
+            print(
+                f"[stock-data] {s} -> {out} rows={len(df)} source={source}"
+                + (f" merged_old={old_rows}" if old_rows else "")
+            )
             ok += 1
         except Exception as e:
             if has_valid_cache(out, min_rows=min_rows, max_age_days=max_age_days):
