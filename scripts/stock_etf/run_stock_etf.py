@@ -740,6 +740,52 @@ def _resolve_structural_cfg(model_cfg):
     }
 
 
+def _resolve_regime_profile(
+    model_cfg: dict,
+    regime_state: str,
+    base_top_n: int,
+    base_min_score: float,
+    base_score_mix: float,
+    base_score_floor: float,
+    base_score_power: float,
+):
+    cfg = model_cfg.get("regime_profiles", {}) if isinstance(model_cfg, dict) else {}
+    enabled = bool(cfg.get("enabled", False))
+    raw = {}
+    if enabled:
+        x = cfg.get(regime_state, {})
+        if isinstance(x, dict):
+            raw = x
+
+    def _pick_int(name, default, minimum=1):
+        try:
+            return max(minimum, int(raw.get(name, default)))
+        except (TypeError, ValueError):
+            return max(minimum, int(default))
+
+    def _pick_float(name, default):
+        try:
+            return float(raw.get(name, default))
+        except (TypeError, ValueError):
+            return float(default)
+
+    return {
+        "enabled": bool(enabled),
+        "regime": str(regime_state),
+        "top_n": _pick_int("top_n", base_top_n, 1),
+        "min_score": _pick_float("min_score", base_min_score),
+        "score_mix": _clamp(_pick_float("score_mix", base_score_mix), 0.0, 1.0),
+        "score_floor": _pick_float("score_floor", base_score_floor),
+        "score_power": max(0.1, _pick_float("score_power", base_score_power)),
+        "alloc_mult": max(0.0, _pick_float("alloc_mult", 1.0)),
+        "turbo_enabled": bool(raw.get("turbo_enabled", False)),
+        "turbo_trend_strength_min": _pick_float("turbo_trend_strength_min", 0.03),
+        "turbo_breadth_min": _pick_float("turbo_breadth_min", 0.80),
+        "turbo_alloc_mult_add": _pick_float("turbo_alloc_mult_add", 0.05),
+        "turbo_top_n_add": _pick_int("turbo_top_n_add", 1, 0),
+    }
+
+
 def _weighted_momentum(close, windows, weights):
     if len(windows) != len(weights) or not windows:
         return None
@@ -1123,10 +1169,11 @@ def run_global_momentum(runtime, stock, risk):
     momentum_lb = int(model_cfg.get("momentum_lb", 252))
     ma_window = int(model_cfg.get("ma_window", 200))
     vol_window = int(model_cfg.get("vol_window", 20))
-    min_score = float(model_cfg.get("min_score", 0.0))
-    risk_on_score_mix = float(model_cfg.get("risk_on_score_mix", 0.0))
-    risk_on_score_floor = float(model_cfg.get("risk_on_score_floor", min_score))
-    risk_on_score_power = float(model_cfg.get("risk_on_score_power", 1.0))
+    min_score_base = float(model_cfg.get("min_score", 0.0))
+    score_mix_base = float(model_cfg.get("risk_on_score_mix", 0.0))
+    score_floor_base = float(model_cfg.get("risk_on_score_floor", min_score_base))
+    score_power_base = float(model_cfg.get("risk_on_score_power", 1.0))
+    benchmark_tradeable = bool(model_cfg.get("benchmark_tradeable", True))
     defensive_bypass_single_max = bool(model_cfg.get("defensive_bypass_single_max", True))
     structural_cfg = _resolve_structural_cfg(model_cfg)
     structural_enabled = bool(structural_cfg["enabled"])
@@ -1157,7 +1204,9 @@ def run_global_momentum(runtime, stock, risk):
     if defensive_symbol not in closes:
         raise RuntimeError(f"defensive data missing: {defensive_symbol}")
 
-    risk_symbols = [s for s in closes.keys() if s != defensive_symbol]
+    risk_symbols = [
+        s for s in closes.keys() if s != defensive_symbol and (benchmark_tradeable or s != benchmark_symbol)
+    ]
     benchmark_close = closes[benchmark_symbol]
     benchmark_ma = None
     benchmark_trend_on = False
@@ -1268,6 +1317,38 @@ def run_global_momentum(runtime, stock, risk):
                 phase2_stepdown_applied = True
     regime_on = bool(regime_state != "risk_off")
 
+    regime_profile = _resolve_regime_profile(
+        model_cfg=model_cfg,
+        regime_state=str(regime_state),
+        base_top_n=top_n,
+        base_min_score=min_score_base,
+        base_score_mix=score_mix_base,
+        base_score_floor=score_floor_base,
+        base_score_power=score_power_base,
+    )
+    min_score_eff = float(regime_profile["min_score"])
+    score_mix_eff = float(regime_profile["score_mix"])
+    score_floor_eff = float(regime_profile["score_floor"])
+    score_power_eff_base = float(regime_profile["score_power"])
+    top_n_profile = int(regime_profile["top_n"])
+    regime_alloc_mult = float(regime_profile["alloc_mult"])
+    trend_strength_now = None
+    if benchmark_ma is not None and abs(float(benchmark_ma)) > 1e-12:
+        trend_strength_now = float(benchmark_close.iloc[-1] / benchmark_ma - 1.0)
+    turbo_triggered = False
+    if (
+        regime_state == "risk_on"
+        and bool(regime_profile.get("turbo_enabled", False))
+        and (trend_strength_now is not None)
+        and (trend_strength_now >= float(regime_profile.get("turbo_trend_strength_min", 0.03)))
+        and (breadth >= float(regime_profile.get("turbo_breadth_min", 0.80)))
+    ):
+        turbo_triggered = True
+        regime_alloc_mult += float(regime_profile.get("turbo_alloc_mult_add", 0.0))
+        top_n_profile += int(regime_profile.get("turbo_top_n_add", 0))
+    top_n_profile = max(1, int(top_n_profile))
+    regime_alloc_mult = max(0.0, float(regime_alloc_mult))
+
     gate_cfg = model_cfg.get("exposure_gate", {})
     history_file = gate_cfg.get(
         "history_file",
@@ -1282,12 +1363,12 @@ def run_global_momentum(runtime, stock, risk):
         eligible = [
             s
             for s in score.keys()
-            if score[s] > min_score
+            if score[s] > min_score_eff
             and ((not structural_cfg["eligibility_require_trend"]) or bool(trend_ok_map.get(s, False)))
             and float(composite_momentum.get(s, 0.0)) > 0.0
         ]
     else:
-        eligible = [s for s in score.keys() if score[s] > min_score]
+        eligible = [s for s in score.keys() if score[s] > min_score_eff]
     sleeve_weights = {}
     signal_reason = "risk_off"
     risk_weights = {}
@@ -1319,9 +1400,23 @@ def run_global_momentum(runtime, stock, risk):
         "signal_strength_enabled": bool(structural_cfg.get("signal_strength_enabled", False)),
         "signal_strength_value": None,
         "signal_strength_alloc_mult": 1.0,
+        "regime_profile_enabled": bool(regime_profile["enabled"]),
+        "regime_profile_name": str(regime_profile["regime"]),
+        "regime_profile_top_n": int(top_n_profile),
+        "regime_profile_min_score": float(min_score_eff),
+        "regime_profile_score_mix": float(score_mix_eff),
+        "regime_profile_score_floor": float(score_floor_eff),
+        "regime_profile_score_power": float(score_power_eff_base),
+        "regime_profile_alloc_mult": float(regime_alloc_mult),
+        "regime_profile_turbo_enabled": bool(regime_profile.get("turbo_enabled", False)),
+        "regime_profile_turbo_triggered": bool(turbo_triggered),
+        "regime_profile_turbo_trend_strength_min": float(regime_profile.get("turbo_trend_strength_min", 0.03)),
+        "regime_profile_turbo_breadth_min": float(regime_profile.get("turbo_breadth_min", 0.80)),
+        "regime_profile_turbo_alloc_mult_add": float(regime_profile.get("turbo_alloc_mult_add", 0.05)),
+        "regime_profile_turbo_top_n_add": int(regime_profile.get("turbo_top_n_add", 1)),
         "score_dispersion": 0.0,
-        "top_n_effective": int(top_n),
-        "score_power_effective": float(risk_on_score_power),
+        "top_n_effective": int(top_n_profile),
+        "score_power_effective": float(score_power_eff_base),
     }
     risk_alloc = effective_alloc
 
@@ -1329,6 +1424,7 @@ def run_global_momentum(runtime, stock, risk):
         risk_alloc_base = float(effective_alloc)
         if regime_state == "neutral":
             risk_alloc_base *= float(structural_cfg["neutral_alloc_mult"])
+        risk_alloc_base *= float(regime_alloc_mult)
 
         trend_alloc_mult = 1.0
         breadth_alloc_mult = 1.0
@@ -1356,9 +1452,9 @@ def run_global_momentum(runtime, stock, risk):
                 float(structural_cfg["total_alloc_mult_max"]),
             )
 
-        top_n_base = int(top_n if regime_state == "risk_on" else min(top_n, structural_cfg["neutral_top_n"]))
+        top_n_base = int(top_n_profile if regime_state == "risk_on" else min(top_n_profile, structural_cfg["neutral_top_n"]))
         top_n_eff = max(1, top_n_base)
-        score_power_eff = float(risk_on_score_power)
+        score_power_eff = float(score_power_eff_base)
         phase2_alloc_mult = 1.0
         phase2_vol_state = "normal"
         phase2_vol_ratio = None
@@ -1441,8 +1537,8 @@ def run_global_momentum(runtime, stock, risk):
             score_map=score,
             vol_map=vol,
             picks=picks,
-            score_mix=risk_on_score_mix,
-            score_floor=risk_on_score_floor,
+            score_mix=score_mix_eff,
+            score_floor=score_floor_eff,
             score_power=score_power_eff,
         )
         sleeve_weights = risk_weights
@@ -1517,10 +1613,13 @@ def run_global_momentum(runtime, stock, risk):
             "momentum_lb": momentum_lb,
             "ma_window": ma_window,
             "vol_window": vol_window,
-            "min_score": min_score,
-            "risk_on_score_mix": risk_on_score_mix,
-            "risk_on_score_floor": risk_on_score_floor,
-            "risk_on_score_power": risk_on_score_power,
+            "min_score": min_score_base,
+            "risk_on_score_mix": score_mix_base,
+            "risk_on_score_floor": score_floor_base,
+            "risk_on_score_power": score_power_base,
+            "benchmark_tradeable": benchmark_tradeable,
+            "regime_profiles": model_cfg.get("regime_profiles", {}),
+            "regime_profile_effective": regime_profile,
             "defensive_bypass_single_max": defensive_bypass_single_max,
             "structural_upgrade": structural_cfg,
         },

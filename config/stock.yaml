@@ -15,11 +15,33 @@ global_model:
   vol_window: 35
   warmup_min_days: 126
   top_n: 2
+  benchmark_tradeable: false
   fee: 0.0008
   min_score: 0.04
   risk_on_score_mix: 0.1
   risk_on_score_floor: 0.01
   risk_on_score_power: 0.7
+  regime_profiles:
+    enabled: true
+    risk_on:
+      top_n: 3
+      min_score: 0.01
+      score_mix: 0.00
+      score_floor: 0.00
+      score_power: 0.85
+      alloc_mult: 1.05
+      turbo_enabled: false
+      turbo_trend_strength_min: 0.03
+      turbo_breadth_min: 0.78
+      turbo_alloc_mult_add: 0.05
+      turbo_top_n_add: 1
+    neutral:
+      top_n: 1
+      min_score: 0.06
+      score_mix: 0.00
+      score_floor: 0.00
+      score_power: 1.20
+      alloc_mult: 0.70
   structural_upgrade:
     enabled: true
     momentum_windows: [20, 60, 180]
@@ -47,15 +69,15 @@ global_model:
     phase2_vol_stress_ratio: 1.10
     phase2_vol_mult_calm: 1.10
     phase2_vol_mult_normal: 1.00
-    phase2_vol_mult_stress: 0.85
+    phase2_vol_mult_stress: 0.90
     phase2_stress_regime_stepdown: 0
     phase2_recovery_enabled: true
     phase2_recovery_window: 180
     phase2_recovery_trigger_drawdown: -0.10
     phase2_recovery_momentum_window: 20
     phase2_recovery_max_mult: 1.10
-    phase2_total_mult_min: 0.70
-    phase2_total_mult_max: 1.25
+    phase2_total_mult_min: 0.60
+    phase2_total_mult_max: 1.20
     phase2_adaptive_enabled: true
     phase2_adaptive_min_top_n: 1
     phase2_adaptive_max_top_n: 5
@@ -87,12 +109,12 @@ global_model:
   risk_governor:
     enabled: true
     vol_window: 20
-    target_daily_vol: 0.011
+    target_daily_vol: 0.0095
     min_alloc_mult: 0.45
-    max_alloc_mult: 0.95
+    max_alloc_mult: 0.70
     dd_window: 100
-    dd_trigger: -0.12
-    dd_alloc_mult: 0.35
+    dd_trigger: -0.08
+    dd_alloc_mult: 0.20
     momentum_window: 40
     momentum_trigger: 0.0
     momentum_alloc_mult: 1.00

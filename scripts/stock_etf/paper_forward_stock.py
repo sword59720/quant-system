@@ -33,7 +33,7 @@ def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
 
 
-def load_price_frame(data_dir: str, symbols: list) -> pd.DataFrame:
+def load_price_frame(data_dir: str, symbols: list) -> tuple[pd.DataFrame, pd.DataFrame]:
     frames = {}
     for s in symbols:
         fp = os.path.join(data_dir, f"{s}.csv")
@@ -42,18 +42,34 @@ def load_price_frame(data_dir: str, symbols: list) -> pd.DataFrame:
         df = pd.read_csv(fp)
         if "date" not in df.columns or "close" not in df.columns:
             continue
-        df["date"] = pd.to_datetime(df["date"])
-        frames[s] = df.sort_values("date").set_index("date")[["close"]]
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+        x = (
+            df.dropna(subset=["date", "close"])
+            .sort_values("date")
+            .drop_duplicates(subset=["date"], keep="last")
+            .set_index("date")
+        )
+        if x.empty:
+            continue
+        frames[s] = x["close"]
 
     if len(frames) < len(symbols):
         missing = [s for s in symbols if s not in frames]
         raise RuntimeError(f"missing stock data files: {missing}")
 
-    dates = sorted(set.intersection(*[set(v.index) for v in frames.values()]))
-    if len(dates) < 400:
-        raise RuntimeError("not enough common stock history (<400 rows)")
+    all_dates = sorted(set.union(*[set(v.index) for v in frames.values()]))
+    if len(all_dates) < 400:
+        raise RuntimeError("not enough stock history (<400 rows union)")
 
-    return pd.DataFrame({s: frames[s].loc[dates, "close"] for s in symbols}, index=dates).sort_index()
+    union_index = pd.DatetimeIndex(all_dates)
+    prices_raw = pd.DataFrame({s: frames[s].reindex(union_index) for s in symbols}, index=union_index).sort_index()
+    availability = prices_raw.notna()
+
+    # Use forward-fill on/after listing dates so non-trading gaps map to 0 return.
+    # Before listing, values remain NaN and are filtered by per-symbol history guards.
+    prices = prices_raw.ffill()
+    return prices, availability
 
 
 def annualized_return(nav: pd.Series, periods_per_year: int = 252) -> float:
@@ -323,6 +339,52 @@ def _resolve_structural_cfg(params: dict) -> dict:
     }
 
 
+def _resolve_regime_profile(
+    params: dict,
+    regime_state: str,
+    base_top_n: int,
+    base_min_score: float,
+    base_score_mix: float,
+    base_score_floor: float,
+    base_score_power: float,
+) -> dict:
+    cfg = params.get("regime_profiles", {}) if isinstance(params, dict) else {}
+    enabled = bool(cfg.get("enabled", False))
+    raw = {}
+    if enabled:
+        x = cfg.get(regime_state, {})
+        if isinstance(x, dict):
+            raw = x
+
+    def _pick_int(name: str, default: int, minimum: int = 1) -> int:
+        try:
+            return max(minimum, int(raw.get(name, default)))
+        except (TypeError, ValueError):
+            return max(minimum, int(default))
+
+    def _pick_float(name: str, default: float) -> float:
+        try:
+            return float(raw.get(name, default))
+        except (TypeError, ValueError):
+            return float(default)
+
+    return {
+        "enabled": bool(enabled),
+        "regime": str(regime_state),
+        "top_n": _pick_int("top_n", base_top_n, 1),
+        "min_score": _pick_float("min_score", base_min_score),
+        "score_mix": _clamp(_pick_float("score_mix", base_score_mix), 0.0, 1.0),
+        "score_floor": _pick_float("score_floor", base_score_floor),
+        "score_power": max(0.1, _pick_float("score_power", base_score_power)),
+        "alloc_mult": max(0.0, _pick_float("alloc_mult", 1.0)),
+        "turbo_enabled": bool(raw.get("turbo_enabled", False)),
+        "turbo_trend_strength_min": _pick_float("turbo_trend_strength_min", 0.03),
+        "turbo_breadth_min": _pick_float("turbo_breadth_min", 0.80),
+        "turbo_alloc_mult_add": _pick_float("turbo_alloc_mult_add", 0.05),
+        "turbo_top_n_add": _pick_int("turbo_top_n_add", 1, 0),
+    }
+
+
 def _weighted_momentum(series: pd.Series, i: int, windows: list[int], weights: list[float]) -> Optional[float]:
     if len(windows) != len(weights) or not windows:
         return None
@@ -428,6 +490,7 @@ def _score_dispersion(scores: dict, eligible: list[str]) -> float:
 
 def build_signal(
     prices: pd.DataFrame,
+    obs_count: pd.DataFrame,
     i: int,
     symbols: list,
     benchmark_symbol: str,
@@ -436,15 +499,18 @@ def build_signal(
     single_max: float,
     params: dict,
 ) -> tuple[dict, bool, str, list]:
-    risk_symbols = [s for s in symbols if s != defensive_symbol]
+    benchmark_tradeable = bool(params.get("benchmark_tradeable", True))
+    risk_symbols = [
+        s for s in symbols if s != defensive_symbol and (benchmark_tradeable or s != benchmark_symbol)
+    ]
     momentum_lb = int(params["momentum_lb"])
     ma_window = int(params["ma_window"])
     vol_window = int(params["vol_window"])
-    top_n = int(params["top_n"])
-    min_score = float(params.get("min_score", 0.0))
-    risk_on_score_mix = float(params.get("risk_on_score_mix", 0.0))
-    risk_on_score_floor = float(params.get("risk_on_score_floor", min_score))
-    risk_on_score_power = float(params.get("risk_on_score_power", 1.0))
+    top_n_base_cfg = int(params["top_n"])
+    min_score_base = float(params.get("min_score", 0.0))
+    score_mix_base = float(params.get("risk_on_score_mix", 0.0))
+    score_floor_base = float(params.get("risk_on_score_floor", min_score_base))
+    score_power_base = float(params.get("risk_on_score_power", 1.0))
     defensive_bypass_single_max = bool(params.get("defensive_bypass_single_max", True))
     structural_cfg = _resolve_structural_cfg(params)
     structural_enabled = bool(structural_cfg["enabled"])
@@ -475,7 +541,8 @@ def build_signal(
                 rel_w,
                 int(structural_cfg["asset_trend_ma_window"]),
             )
-        if i < need:
+        obs = int(obs_count[s].iloc[i]) if s in obs_count.columns else 0
+        if obs <= need:
             continue
 
         if structural_enabled:
@@ -560,17 +627,49 @@ def build_signal(
                 regime_state = "neutral"
                 phase2_stepdown_applied = True
 
+    regime_profile = _resolve_regime_profile(
+        params=params,
+        regime_state=str(regime_state),
+        base_top_n=top_n_base_cfg,
+        base_min_score=min_score_base,
+        base_score_mix=score_mix_base,
+        base_score_floor=score_floor_base,
+        base_score_power=score_power_base,
+    )
+    min_score_eff = float(regime_profile["min_score"])
+    score_mix_eff = float(regime_profile["score_mix"])
+    score_floor_eff = float(regime_profile["score_floor"])
+    score_power_eff_base = float(regime_profile["score_power"])
+    top_n_profile = int(regime_profile["top_n"])
+    regime_alloc_mult = float(regime_profile["alloc_mult"])
+    trend_strength_now = None
+    if benchmark_ma is not None and abs(float(benchmark_ma)) > 1e-12:
+        trend_strength_now = float(prices[benchmark_symbol].iloc[i] / benchmark_ma - 1.0)
+    turbo_triggered = False
+    if (
+        regime_state == "risk_on"
+        and bool(regime_profile.get("turbo_enabled", False))
+        and (trend_strength_now is not None)
+        and (trend_strength_now >= float(regime_profile.get("turbo_trend_strength_min", 0.03)))
+        and (breadth >= float(regime_profile.get("turbo_breadth_min", 0.80)))
+    ):
+        turbo_triggered = True
+        regime_alloc_mult += float(regime_profile.get("turbo_alloc_mult_add", 0.0))
+        top_n_profile += int(regime_profile.get("turbo_top_n_add", 0))
+    top_n_profile = max(1, int(top_n_profile))
+    regime_alloc_mult = max(0.0, float(regime_alloc_mult))
+
     regime_on = bool(regime_state != "risk_off")
     if structural_enabled:
         eligible = [
             s
             for s in scores
-            if scores[s]["score"] > min_score
+            if scores[s]["score"] > min_score_eff
             and ((not structural_cfg["eligibility_require_trend"]) or scores[s]["trend_ok"])
             and scores[s]["composite_momentum"] > 0.0
         ]
     else:
-        eligible = [s for s in scores if scores[s]["score"] > min_score]
+        eligible = [s for s in scores if scores[s]["score"] > min_score_eff]
 
     target = {s: 0.0 for s in symbols}
     reason = "risk_off"
@@ -603,14 +702,29 @@ def build_signal(
         "signal_strength_enabled": bool(structural_cfg.get("signal_strength_enabled", False)),
         "signal_strength_value": None,
         "signal_strength_alloc_mult": 1.0,
+        "regime_profile_enabled": bool(regime_profile["enabled"]),
+        "regime_profile_name": str(regime_profile["regime"]),
+        "regime_profile_top_n": int(top_n_profile),
+        "regime_profile_min_score": float(min_score_eff),
+        "regime_profile_score_mix": float(score_mix_eff),
+        "regime_profile_score_floor": float(score_floor_eff),
+        "regime_profile_score_power": float(score_power_eff_base),
+        "regime_profile_alloc_mult": float(regime_alloc_mult),
+        "regime_profile_turbo_enabled": bool(regime_profile.get("turbo_enabled", False)),
+        "regime_profile_turbo_triggered": bool(turbo_triggered),
+        "regime_profile_turbo_trend_strength_min": float(regime_profile.get("turbo_trend_strength_min", 0.03)),
+        "regime_profile_turbo_breadth_min": float(regime_profile.get("turbo_breadth_min", 0.80)),
+        "regime_profile_turbo_alloc_mult_add": float(regime_profile.get("turbo_alloc_mult_add", 0.05)),
+        "regime_profile_turbo_top_n_add": int(regime_profile.get("turbo_top_n_add", 1)),
         "score_dispersion": 0.0,
-        "top_n_effective": int(top_n),
-        "score_power_effective": float(risk_on_score_power),
+        "top_n_effective": int(top_n_profile),
+        "score_power_effective": float(score_power_eff_base),
     }
     if regime_state in {"risk_on", "neutral"} and eligible:
         risk_alloc_base = float(alloc_pct)
         if regime_state == "neutral":
             risk_alloc_base *= float(structural_cfg["neutral_alloc_mult"])
+        risk_alloc_base *= float(regime_alloc_mult)
 
         trend_alloc_mult = 1.0
         breadth_alloc_mult = 1.0
@@ -638,9 +752,9 @@ def build_signal(
                 float(structural_cfg["total_alloc_mult_max"]),
             )
 
-        top_n_base = int(top_n if regime_state == "risk_on" else min(top_n, structural_cfg["neutral_top_n"]))
+        top_n_base = int(top_n_profile if regime_state == "risk_on" else min(top_n_profile, structural_cfg["neutral_top_n"]))
         top_n_eff = max(1, top_n_base)
-        score_power_eff = float(risk_on_score_power)
+        score_power_eff = float(score_power_eff_base)
         phase2_alloc_mult = 1.0
         phase2_vol_state = "normal"
         phase2_vol_ratio = None
@@ -728,8 +842,8 @@ def build_signal(
         risk_weights = build_risk_on_weights(
             scores=scores,
             picks=picks,
-            score_mix=risk_on_score_mix,
-            score_floor=risk_on_score_floor,
+            score_mix=score_mix_eff,
+            score_floor=score_floor_eff,
             score_power=score_power_eff,
         )
         for s, w in risk_weights.items():
@@ -789,7 +903,8 @@ def run_paper_forward(runtime, stock, risk):
     report_dir = os.path.join(runtime["paths"]["output_dir"], "reports")
     ensure_dir(report_dir)
 
-    prices = load_price_frame(data_dir, symbols)
+    prices, availability = load_price_frame(data_dir, symbols)
+    obs_count = availability.cumsum()
     warmup_min_days = int(model_cfg.get("warmup_min_days", 126))
     struct_cfg = model_cfg.get("structural_upgrade", {}) or {}
     struct_windows = []
@@ -809,7 +924,7 @@ def run_paper_forward(runtime, stock, risk):
     struct_phase2_vol_long = int(struct_cfg.get("phase2_vol_long_window", 80)) if struct_phase2_enabled else 0
     struct_phase2_recovery_window = int(struct_cfg.get("phase2_recovery_window", 180)) if struct_phase2_enabled else 0
     struct_phase2_recovery_mom = int(struct_cfg.get("phase2_recovery_momentum_window", 20)) if struct_phase2_enabled else 0
-    warmup = max(
+    required_hist_days = max(
         int(model_cfg.get("momentum_lb", 252)),
         int(model_cfg.get("ma_window", 200)),
         int(model_cfg.get("vol_window", 20)),
@@ -820,9 +935,25 @@ def run_paper_forward(runtime, stock, risk):
         struct_phase2_recovery_window,
         struct_phase2_recovery_mom,
         warmup_min_days,
-    ) + 1
-    if warmup >= len(prices) - 1:
+    )
+    start_scan = required_hist_days + 1
+    if start_scan >= len(prices) - 1:
         raise RuntimeError("not enough history for paper-forward simulation")
+
+    start_idx = None
+    for i in range(start_scan, len(prices) - 1):
+        bench_obs = int(obs_count[benchmark_symbol].iloc[i])
+        def_obs = int(obs_count[defensive_symbol].iloc[i])
+        if bench_obs <= required_hist_days or def_obs <= required_hist_days:
+            continue
+        if not bool(availability[benchmark_symbol].iloc[i]) or not bool(availability[benchmark_symbol].iloc[i + 1]):
+            continue
+        if not bool(availability[defensive_symbol].iloc[i]) or not bool(availability[defensive_symbol].iloc[i + 1]):
+            continue
+        start_idx = i
+        break
+    if start_idx is None:
+        raise RuntimeError("not enough benchmark/defensive history for paper-forward simulation")
 
     fee = float(model_cfg.get("fee", 0.0008))
     min_rebalance_days = int(guard_cfg.get("min_rebalance_days", model_cfg.get("rebalance_days", 20)))
@@ -864,9 +995,11 @@ def run_paper_forward(runtime, stock, risk):
         "stage": "disabled",
         "reason": "init",
     }
-    for i in range(warmup, len(prices) - 1):
+    for i in range(start_idx, len(prices) - 1):
         date = prices.index[i]
         next_date = prices.index[i + 1]
+        if not bool(availability[benchmark_symbol].iloc[i]) or not bool(availability[benchmark_symbol].iloc[i + 1]):
+            continue
         alloc_effective, exposure_meta = evaluate_exposure_gate(
             hist_strategy_ret,
             hist_benchmark_ret_alloc,
@@ -876,6 +1009,7 @@ def run_paper_forward(runtime, stock, risk):
         min_turnover, min_turnover_meta = resolve_min_turnover(min_turnover_base, alloc_effective, guard_cfg)
         proposed, regime_on, signal_reason, score_rows, risk_governor_meta = build_signal(
             prices=prices,
+            obs_count=obs_count,
             i=i,
             symbols=symbols,
             benchmark_symbol=benchmark_symbol,
@@ -1068,6 +1202,9 @@ def run_paper_forward(runtime, stock, risk):
         last_exposure_meta = exposure_meta
         weights = executed
         last_regime_on = regime_on
+
+    if not records:
+        raise RuntimeError("no tradable periods after history/availability filters")
 
     df = pd.DataFrame(records)
     history_file = os.path.join(report_dir, "stock_paper_forward_history.csv")
