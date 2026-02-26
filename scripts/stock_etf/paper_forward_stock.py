@@ -108,6 +108,30 @@ def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
+def _parse_symbol_weight_caps(raw_caps, default_cap: float) -> dict:
+    if not isinstance(raw_caps, dict):
+        return {}
+    out = {}
+    for k, v in raw_caps.items():
+        sym = str(k or "").strip()
+        if not sym:
+            continue
+        try:
+            cap = float(v)
+        except (TypeError, ValueError):
+            continue
+        if cap <= 0:
+            continue
+        out[sym] = float(_clamp(cap, 0.0, float(default_cap)))
+    return out
+
+
+def _cap_for_symbol(symbol: str, default_cap: float, caps: dict) -> float:
+    if isinstance(caps, dict) and symbol in caps:
+        return float(caps[symbol])
+    return float(default_cap)
+
+
 def compute_risk_alloc_multiplier(
     prices: pd.DataFrame,
     i: int,
@@ -512,6 +536,7 @@ def build_signal(
     score_floor_base = float(params.get("risk_on_score_floor", min_score_base))
     score_power_base = float(params.get("risk_on_score_power", 1.0))
     defensive_bypass_single_max = bool(params.get("defensive_bypass_single_max", True))
+    symbol_weight_caps = _parse_symbol_weight_caps(params.get("symbol_weight_caps", {}), float(single_max))
     structural_cfg = _resolve_structural_cfg(params)
     structural_enabled = bool(structural_cfg["enabled"])
 
@@ -702,6 +727,7 @@ def build_signal(
         "signal_strength_enabled": bool(structural_cfg.get("signal_strength_enabled", False)),
         "signal_strength_value": None,
         "signal_strength_alloc_mult": 1.0,
+        "symbol_weight_caps": symbol_weight_caps,
         "regime_profile_enabled": bool(regime_profile["enabled"]),
         "regime_profile_name": str(regime_profile["regime"]),
         "regime_profile_top_n": int(top_n_profile),
@@ -850,11 +876,15 @@ def build_signal(
             target[s] = risk_alloc * w
         for s in picks:
             if (not defensive_bypass_single_max) or s != defensive_symbol:
-                target[s] = min(target[s], single_max)
+                target[s] = min(
+                    target[s],
+                    _cap_for_symbol(s, float(single_max), symbol_weight_caps),
+                )
         used = sum(target.values())
         if used < alloc_pct:
             if (not defensive_bypass_single_max):
-                room = max(0.0, single_max - target[defensive_symbol])
+                defensive_cap = _cap_for_symbol(defensive_symbol, float(single_max), symbol_weight_caps)
+                room = max(0.0, defensive_cap - target[defensive_symbol])
                 target[defensive_symbol] += min(room, alloc_pct - used)
             else:
                 target[defensive_symbol] += alloc_pct - used
@@ -898,6 +928,7 @@ def run_paper_forward(runtime, stock, risk):
     symbols = sorted(set(stock.get("universe", []) + [benchmark_symbol, defensive_symbol]))
     alloc_pct = float(stock.get("capital_alloc_pct", 0.7))
     single_max = float(risk["position_limits"]["stock_single_max_pct"])
+    symbol_weight_caps = _parse_symbol_weight_caps(model_cfg.get("symbol_weight_caps", {}), float(single_max))
 
     data_dir = os.path.join(runtime["paths"]["data_dir"], "stock")
     report_dir = os.path.join(runtime["paths"]["output_dir"], "reports")
@@ -1093,7 +1124,7 @@ def run_paper_forward(runtime, stock, risk):
             if overlay_state_active:
                 tw = float(alloc_effective)
                 if not defensive_bypass_single_max:
-                    tw = min(tw, float(single_max))
+                    tw = min(tw, _cap_for_symbol(defensive_symbol, float(single_max), symbol_weight_caps))
                 proposed = {s: 0.0 for s in symbols}
                 proposed[defensive_symbol] = tw
                 if calc_turnover(proposed_before_overlay, proposed, symbols) > 1e-8:

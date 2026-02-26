@@ -527,6 +527,30 @@ def _clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
 
+def _parse_symbol_weight_caps(raw_caps, default_cap: float) -> dict:
+    if not isinstance(raw_caps, dict):
+        return {}
+    out = {}
+    for k, v in raw_caps.items():
+        sym = str(k or "").strip()
+        if not sym:
+            continue
+        try:
+            cap = float(v)
+        except (TypeError, ValueError):
+            continue
+        if cap <= 0:
+            continue
+        out[sym] = float(_clamp(cap, 0.0, float(default_cap)))
+    return out
+
+
+def _cap_for_symbol(symbol: str, default_cap: float, caps: dict) -> float:
+    if isinstance(caps, dict) and symbol in caps:
+        return float(caps[symbol])
+    return float(default_cap)
+
+
 def compute_risk_alloc_multiplier(benchmark_close, model_cfg):
     cfg = model_cfg.get("risk_governor", {}) if isinstance(model_cfg, dict) else {}
     enabled = bool(cfg.get("enabled", False))
@@ -1358,6 +1382,7 @@ def run_global_momentum(runtime, stock, risk):
     effective_alloc, exposure_meta = evaluate_exposure_gate(hist_strategy_ret, hist_bench_alloc, alloc_pct, gate_cfg)
     stock_capital = total_capital * effective_alloc
     single_max = float(risk["position_limits"]["stock_single_max_pct"])
+    symbol_weight_caps = _parse_symbol_weight_caps(model_cfg.get("symbol_weight_caps", {}), float(single_max))
 
     if structural_enabled:
         eligible = [
@@ -1558,7 +1583,7 @@ def run_global_momentum(runtime, stock, risk):
     capped_targets = {}
     for s, tw in raw_targets.items():
         if (not defensive_bypass_single_max) or s != defensive_symbol:
-            capped_targets[s] = min(float(tw), single_max)
+            capped_targets[s] = min(float(tw), _cap_for_symbol(s, float(single_max), symbol_weight_caps))
         else:
             capped_targets[s] = float(tw)
 
@@ -1568,7 +1593,8 @@ def run_global_momentum(runtime, stock, risk):
         if defensive_symbol not in capped_targets:
             capped_targets[defensive_symbol] = 0.0
         if (not defensive_bypass_single_max):
-            defensive_room = max(0.0, single_max - capped_targets[defensive_symbol])
+            defensive_cap = _cap_for_symbol(defensive_symbol, float(single_max), symbol_weight_caps)
+            defensive_room = max(0.0, defensive_cap - capped_targets[defensive_symbol])
             capped_targets[defensive_symbol] += min(remain_alloc, defensive_room)
         else:
             capped_targets[defensive_symbol] += remain_alloc
@@ -1621,6 +1647,7 @@ def run_global_momentum(runtime, stock, risk):
             "regime_profiles": model_cfg.get("regime_profiles", {}),
             "regime_profile_effective": regime_profile,
             "defensive_bypass_single_max": defensive_bypass_single_max,
+            "symbol_weight_caps": symbol_weight_caps,
             "structural_upgrade": structural_cfg,
         },
         "scores": scores,

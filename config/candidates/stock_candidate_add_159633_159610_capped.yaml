@@ -1,13 +1,10 @@
 enabled: true
 market: CN_STOCK
 mode: global_momentum
-backtest_mode: production  # production | research
-
-capital_alloc_pct: 1.00
-
-benchmark_symbol: "510300"
-defensive_symbol: "518880"
-
+backtest_mode: production
+capital_alloc_pct: 1.0
+benchmark_symbol: '510300'
+defensive_symbol: '518880'
 global_model:
   rebalance_days: 5
   momentum_lb: 160
@@ -26,8 +23,8 @@ global_model:
     risk_on:
       top_n: 3
       min_score: 0.01
-      score_mix: 0.00
-      score_floor: 0.00
+      score_mix: 0.0
+      score_floor: 0.0
       score_power: 0.85
       alloc_mult: 1.05
       turbo_enabled: false
@@ -38,46 +35,52 @@ global_model:
     neutral:
       top_n: 1
       min_score: 0.06
-      score_mix: 0.00
-      score_floor: 0.00
-      score_power: 1.20
-      alloc_mult: 0.70
+      score_mix: 0.0
+      score_floor: 0.0
+      score_power: 1.2
+      alloc_mult: 0.7
   structural_upgrade:
     enabled: true
-    momentum_windows: [20, 60, 180]
-    momentum_weights: [0.50, 0.30, 0.20]
+    momentum_windows:
+    - 20
+    - 60
+    - 180
+    momentum_weights:
+    - 0.5
+    - 0.3
+    - 0.2
     eligibility_require_trend: false
     score_blend: 0.15
     relative_momentum_window: 60
-    relative_momentum_weight: 0.00
+    relative_momentum_weight: 0.0
     asset_trend_ma_window: 80
     breadth_on_threshold: 0.55
     breadth_off_threshold: 0.15
-    neutral_alloc_mult: 1.00
+    neutral_alloc_mult: 1.0
     neutral_top_n: 2
     trend_strength_k: 2.0
     trend_alloc_mult_min: 0.85
     trend_alloc_mult_max: 1.15
     breadth_alloc_mult_min: 0.85
-    breadth_alloc_mult_max: 1.10
-    total_alloc_mult_min: 0.70
+    breadth_alloc_mult_max: 1.1
+    total_alloc_mult_min: 0.7
     total_alloc_mult_max: 1.05
     phase2_enabled: true
     phase2_vol_short_window: 15
     phase2_vol_long_window: 80
     phase2_vol_calm_ratio: 0.85
-    phase2_vol_stress_ratio: 1.10
-    phase2_vol_mult_calm: 1.10
-    phase2_vol_mult_normal: 1.00
-    phase2_vol_mult_stress: 0.90
+    phase2_vol_stress_ratio: 1.1
+    phase2_vol_mult_calm: 1.1
+    phase2_vol_mult_normal: 1.0
+    phase2_vol_mult_stress: 0.9
     phase2_stress_regime_stepdown: 0
     phase2_recovery_enabled: true
     phase2_recovery_window: 180
-    phase2_recovery_trigger_drawdown: -0.10
+    phase2_recovery_trigger_drawdown: -0.1
     phase2_recovery_momentum_window: 20
-    phase2_recovery_max_mult: 1.10
-    phase2_total_mult_min: 0.60
-    phase2_total_mult_max: 1.20
+    phase2_recovery_max_mult: 1.1
+    phase2_total_mult_min: 0.6
+    phase2_total_mult_max: 1.2
     phase2_adaptive_enabled: true
     phase2_adaptive_min_top_n: 1
     phase2_adaptive_max_top_n: 5
@@ -85,39 +88,39 @@ global_model:
     phase2_adaptive_stress_top_n_delta: 1
     phase2_adaptive_high_dispersion_threshold: 0.22
     phase2_adaptive_high_dispersion_top_n_delta: -1
-    phase2_adaptive_score_power_calm_mult: 1.20
+    phase2_adaptive_score_power_calm_mult: 1.2
     phase2_adaptive_score_power_stress_mult: 0.85
     signal_strength_enabled: false
-    signal_strength_floor: 0.00
+    signal_strength_floor: 0.0
     signal_strength_ref: 0.06
-    signal_strength_curve: 1.00
-    signal_strength_min_alloc_mult: 0.70
-    signal_strength_max_alloc_mult: 1.10
+    signal_strength_curve: 1.0
+    signal_strength_min_alloc_mult: 0.7
+    signal_strength_max_alloc_mult: 1.1
   defensive_bypass_single_max: true
   execution_guard:
     enabled: true
     min_rebalance_days: 20
-    min_turnover: 0.010
+    min_turnover: 0.01
     dynamic_min_turnover:
       enabled: false
       alloc_ref: 0.95
-      min_multiplier: 0.50
-      max_multiplier: 1.50
+      min_multiplier: 0.5
+      max_multiplier: 1.5
       floor: 0.001
-      ceil: 0.040
+      ceil: 0.04
     force_rebalance_on_regime_change: false
   risk_governor:
     enabled: true
     vol_window: 20
     target_daily_vol: 0.0095
     min_alloc_mult: 0.45
-    max_alloc_mult: 0.70
+    max_alloc_mult: 0.7
     dd_window: 100
     dd_trigger: -0.08
-    dd_alloc_mult: 0.20
+    dd_alloc_mult: 0.2
     momentum_window: 40
     momentum_trigger: 0.0
-    momentum_alloc_mult: 1.00
+    momentum_alloc_mult: 1.0
   risk_overlay:
     enabled: true
     monitor_file: ./outputs/reports/stock_paper_forward_latest.json
@@ -130,45 +133,49 @@ global_model:
   exposure_gate:
     enabled: false
     history_file: ./outputs/reports/stock_paper_forward_history.csv
-    lookback_days: [63, 126]
+    lookback_days:
+    - 63
+    - 126
     cpcv:
       n_groups: 5
       test_groups: 2
       embargo_days: 1
       min_fold_days: 12
     thresholds:
-      warn_worst_min: -0.10
+      warn_worst_min: -0.1
       risk_worst_min: -0.14
     alloc_caps:
-      pass: 0.70
-      warn: 0.60
-      risk: 0.50
-
+      pass: 0.7
+      warn: 0.6
+      risk: 0.5
+  symbol_weight_caps:
+    '159610': 0.35
 universe:
-  - "159633" #新能车ETF
-  - "159915" #创业板ETF
-  - "159949" #创业板50ETF
-  - "159819" #人工智能ETF
-  - "510300" #沪深300ETF
-  - "510500" #中证500ETF
-  - "512100" #中证1000ETF
-  - "513100" #纳指ETF
-  - "518880" #黄金ETF
-
+- '159610'
+- '159633'
+- '159819'
+- '159915'
+- '159949'
+- '510300'
+- '510500'
+- '512100'
+- '513100'
+- '518880'
 signal:
-  momentum_lookback_days: [20, 60]
-  momentum_weights: [0.6, 0.4]
+  momentum_lookback_days:
+  - 20
+  - 60
+  momentum_weights:
+  - 0.6
+  - 0.4
   rebalance_weekday: 1
   top_n: 2
-
 filters:
   min_avg_turnover_cny: 50000000
   suspend_filter: true
-
 validation:
   cpcv:
     enabled: true
-    # Window-specific CPCV setup tuned for current history length.
     windows:
       full:
         start_date: null
@@ -177,23 +184,30 @@ validation:
         embargo_days: 15
         min_fold_days: 80
       oos_2023:
-        start_date: "2023-01-03"
+        start_date: '2023-01-03'
         n_groups: 8
         test_groups: 3
         embargo_days: 15
         min_fold_days: 60
-    # Suggested gate table (production promotion gate).
     thresholds:
-      excess_ann_mean_min: 0.0200
-      excess_ann_median_min: 0.0150
-      excess_ann_worst_min: -0.0800
+      excess_ann_mean_min: 0.02
+      excess_ann_median_min: 0.015
+      excess_ann_worst_min: -0.08
       excess_ann_win_rate_min: 0.58
-      sharpe_median_min: 0.60
+      sharpe_median_min: 0.6
       max_drawdown_worst_min: -0.22
-    # Parameter search for N / k / embargo.
     search:
       enabled: true
-      n_groups_candidates: [8, 10, 12]
-      test_groups_candidates: [2, 3]
-      embargo_days_candidates: [10, 15, 20, 30]
+      n_groups_candidates:
+      - 8
+      - 10
+      - 12
+      test_groups_candidates:
+      - 2
+      - 3
+      embargo_days_candidates:
+      - 10
+      - 15
+      - 20
+      - 30
       max_results: 12
