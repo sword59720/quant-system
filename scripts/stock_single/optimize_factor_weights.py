@@ -497,7 +497,6 @@ def backtest_with_weights(runtime, stock_single, score_weights):
         raise RuntimeError("invalid date range after warmup")
 
     weights = {s: 0.0 for s in symbols}
-    strategy_nav = 1.0
     strategy_rets = []
 
     for i in range(start_idx, loop_end_i + 1):
@@ -595,14 +594,13 @@ def backtest_with_weights(runtime, stock_single, score_weights):
             port_ret += float(w) * (float(px1) / float(px0) - 1.0)
         port_ret -= trade_cost
 
-        strategy_nav *= 1.0 + port_ret
         strategy_rets.append(float(port_ret))
 
     if len(strategy_rets) < 2:
         raise RuntimeError("backtest periods too short after filtering")
 
-    nav_s = pd.Series([1.0] + [strategy_nav] * len(strategy_rets))
-    ret_s = pd.Series(strategy_rets)
+    ret_s = pd.Series(strategy_rets, dtype=float)
+    nav_s = pd.concat([pd.Series([1.0], dtype=float), (1.0 + ret_s).cumprod()], ignore_index=True)
 
     annual_return = annualized_return(nav_s, 252)
     sharpe = sharpe_ratio(ret_s, 252)
@@ -627,6 +625,9 @@ def main():
         print("[system] disabled by config/runtime.yaml: enabled=false")
         return EXIT_DISABLED
 
+    backtest_cfg = stock_single.get("backtest", {})
+    max_drawdown_limit = float(backtest_cfg.get("optimize_max_drawdown_limit", -0.15))
+
     # 定义因子权重搜索空间
     mom20_range = [0.3, 0.35, 0.4, 0.45]
     mom60_range = [0.25, 0.3, 0.35, 0.4]
@@ -640,14 +641,35 @@ def main():
     volume_change_range = [0.15, 0.18, 0.2, 0.22]
     sentiment_range = [0.1, 0.15, 0.2, 0.25]
 
-    best_result = {
-        "annual_return": -float('inf'),
-        "sharpe": -float('inf'),
-        "max_drawdown": float('inf'),
-        "score_weights": {}
-    }
-
+    best_feasible_result = None
+    best_infeasible_result = None
     results = []
+
+    def better_feasible_result(candidate: dict, incumbent: dict) -> bool:
+        if incumbent is None:
+            return True
+        if candidate["annual_return"] > incumbent["annual_return"]:
+            return True
+        if candidate["annual_return"] < incumbent["annual_return"]:
+            return False
+        if candidate["max_drawdown"] > incumbent["max_drawdown"]:
+            return True
+        if candidate["max_drawdown"] < incumbent["max_drawdown"]:
+            return False
+        return candidate["sharpe"] > incumbent["sharpe"]
+
+    def better_infeasible_result(candidate: dict, incumbent: dict) -> bool:
+        if incumbent is None:
+            return True
+        if candidate["max_drawdown"] > incumbent["max_drawdown"]:
+            return True
+        if candidate["max_drawdown"] < incumbent["max_drawdown"]:
+            return False
+        if candidate["annual_return"] > incumbent["annual_return"]:
+            return True
+        if candidate["annual_return"] < incumbent["annual_return"]:
+            return False
+        return candidate["sharpe"] > incumbent["sharpe"]
 
     # 生成所有可能的权重组合
     # 为了减少计算量，我们只选择部分组合进行测试
@@ -668,16 +690,34 @@ def main():
 
         try:
             result = backtest_with_weights(runtime, stock_single, score_weights)
+            result["feasible"] = bool(result["max_drawdown"] >= max_drawdown_limit)
             results.append(result)
             print(f"Testing weights: {score_weights}")
-            print(f"Result: Annual Return={result['annual_return']:.4f}, Sharpe={result['sharpe']:.4f}, Max DD={result['max_drawdown']:.4f}")
+            print(
+                "Result: "
+                f"Annual Return={result['annual_return']:.4f}, "
+                f"Sharpe={result['sharpe']:.4f}, "
+                f"Max DD={result['max_drawdown']:.4f}, "
+                f"Feasible={result['feasible']}"
+            )
 
-            # 更新最佳结果
-            if result['annual_return'] > best_result['annual_return'] and result['sharpe'] > best_result['sharpe']:
-                best_result = result
+            # 目标：在 MDD 约束内最大化年化收益；Sharpe 仅监控（同年化时用于平局决策）
+            if result["feasible"]:
+                if better_feasible_result(result, best_feasible_result):
+                    best_feasible_result = result
+            else:
+                if better_infeasible_result(result, best_infeasible_result):
+                    best_infeasible_result = result
         except Exception as e:
             print(f"Error testing weights {score_weights}: {e}")
             continue
+
+    best_result = best_feasible_result if best_feasible_result is not None else best_infeasible_result
+    if best_result is None:
+        print("[optimize-factor-weights] no valid optimization result generated")
+        return EXIT_SIGNAL_ERROR
+
+    feasible_count = sum(1 for r in results if bool(r.get("feasible", False)))
 
     # 输出结果
     out_dir = os.path.join(runtime["paths"]["output_dir"], "reports")
@@ -686,7 +726,19 @@ def main():
 
     output = {
         "ts": datetime.now().isoformat(),
+        "objective": {
+            "primary": "annual_return_max",
+            "constraint": {"max_drawdown_gte": max_drawdown_limit},
+            "monitor": ["sharpe"],
+        },
+        "summary": {
+            "total_candidates": len(results),
+            "feasible_candidates": feasible_count,
+            "infeasible_candidates": len(results) - feasible_count,
+        },
         "best_result": best_result,
+        "best_feasible_result": best_feasible_result,
+        "best_infeasible_result": best_infeasible_result,
         "all_results": results
     }
 
@@ -694,6 +746,13 @@ def main():
         json.dump(output, f, ensure_ascii=False, indent=2)
 
     print(f"\nBest result:")
+    if best_feasible_result is None:
+        print(
+            "[warn] no feasible candidate under MDD constraint "
+            f"(max_drawdown >= {max_drawdown_limit:.2%}); fallback to least-infeasible candidate."
+        )
+    print(f"Objective: maximize annual return, constraint max drawdown >= {max_drawdown_limit:.2%}, sharpe monitor only")
+    print(f"Feasible candidates: {feasible_count}/{len(results)}")
     print(f"Annual Return: {best_result['annual_return']:.4f}")
     print(f"Sharpe Ratio: {best_result['sharpe']:.4f}")
     print(f"Max Drawdown: {best_result['max_drawdown']:.4f}")

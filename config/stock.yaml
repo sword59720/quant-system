@@ -182,6 +182,12 @@ validation:
         test_groups: 3
         embargo_days: 15
         min_fold_days: 60
+      oos_2025:
+        start_date: "2025-01-02"
+        n_groups: 8
+        test_groups: 3
+        embargo_days: 15
+        min_fold_days: 60
     # Suggested gate table (production promotion gate).
     thresholds:
       excess_ann_mean_min: 0.0200

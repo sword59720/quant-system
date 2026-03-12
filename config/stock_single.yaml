@@ -115,6 +115,7 @@ risk:
 backtest:
   benchmark_symbol: "510300"
   warmup_days: 60
+  optimize_max_drawdown_limit: -0.15
   require_factor_data: false
   min_factor_coverage: 0.05
   score_weights:

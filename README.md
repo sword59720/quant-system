@@ -147,6 +147,9 @@ cd /home/haojc/.openclaw/workspace/quant-system
 
 ## 4.2 个股模型（构建股票池 + 小时信号，默认关闭）
 
+核心逻辑文档（含版本与日期）：
+- `docs/stock_single_trading_core.md`
+
 ```bash
 cd /home/haojc/.openclaw/workspace/quant-system
 ./.venv/bin/python scripts/stock_single/fetch_stock_single_data.py
@@ -157,7 +160,7 @@ cd /home/haojc/.openclaw/workspace/quant-system
 > 数据抓取和回测可在 `enabled: false` 下执行。
 > `scripts/stock_single/run_stock_single.py` 默认执行 `full`（建池 + 快风控 + 小时信号）。
 > `stock_single` 仅允许A股个股代码（按交易所前缀校验），ETF和指数代码会被自动过滤/拒绝。
-> 信号触发支持 `signal.trigger_mode: threshold | quantile | topk`，默认使用 `quantile` 动态阈值。
+> 信号触发支持 `signal.trigger_mode: threshold | quantile | topk`，当前默认使用 `topk` 动态阈值。
 
 按任务运行：
 
@@ -200,6 +203,25 @@ cd /home/haojc/.openclaw/workspace/quant-system
 # 快风控（建议每5分钟）
 ./.venv/bin/python scripts/stock_single/run_stock_single.py --task risk
 ```
+
+QMT 执行桥（读取 `stock_single_signals.json` 并生成/执行订单）：
+
+```bash
+# 仅生成订单计划（不下单）
+./.venv/bin/python scripts/stock_single/qmt_stock_single_strategy.py --mode plan
+
+# 先刷新个股信号，再生成订单计划
+./.venv/bin/python scripts/stock_single/qmt_stock_single_strategy.py --mode plan --refresh-signals --signal-task full
+
+# QMT 实盘下单（需本机可导入 xtquant）
+./.venv/bin/python scripts/stock_single/qmt_stock_single_strategy.py \
+  --mode live \
+  --qmt-path "/path/to/qmt_userdata" \
+  --account-id "your_stock_account_id"
+```
+
+> 说明：脚本会自动按 `max_positions` 与 `capital_alloc_pct` 做目标仓位截断/缩放，避免超配。  
+> 说明：`--mode live --dry-run-live` 可走完整下单流程但不实际发单，用于联调。
 
 输入文件约定：
 
