@@ -131,6 +131,8 @@ universe:
   - "512100" #中证1000ETF
   - "513100" #纳指ETF
   - "518880" #黄金ETF
+  - "511010" #国债ETF
+  - "511990" #华宝添益
 
 signal:
   momentum_lookback_days: [20, 60]

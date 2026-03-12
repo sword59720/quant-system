@@ -49,7 +49,7 @@ def load_config() -> dict:
     with open("./config/runtime.yaml", "r", encoding="utf-8") as f:
         runtime = yaml.safe_load(f)
 
-    env = runtime.get("env", "paper")
+    runtime_env = runtime.get("env", "paper")
     total_capital = runtime.get("total_capital", 20000)
 
     broker_full_config = {}
@@ -59,7 +59,6 @@ def load_config() -> dict:
 
     config = broker_full_config.get("crypto", {})
     config["broker"] = "crypto"
-    config["env"] = env
     config["total_capital"] = total_capital
     config["_runtime_paths"] = runtime.get("paths", {})
 
@@ -68,6 +67,10 @@ def load_config() -> dict:
             crypto_cfg = yaml.safe_load(f)
         if isinstance(crypto_cfg, dict):
             config.update(crypto_cfg)
+
+    # 允许 crypto 维度单独覆盖执行环境：优先 trade_mode，再回退 runtime.env
+    trade_mode = str(config.get("trade_mode", "")).strip().lower()
+    config["env"] = trade_mode if trade_mode in {"paper", "live"} else str(runtime_env).strip().lower()
 
     return config
 

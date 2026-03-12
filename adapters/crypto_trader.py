@@ -84,42 +84,102 @@ class BaseTrader:
 
 
 class CryptoPaperTrader(BaseTrader):
-    """Crypto 模拟交易器"""
-    
+    """Crypto 模拟交易器（支持自动记录仓位）"""
+
+    def __init__(self, config: Dict):
+        super().__init__(config)
+        self.position_file = self.config.get("position_file", "./outputs/state/crypto_positions.json")
+        self.paper_total_asset = float(self.config.get("total_capital", 20000.0) or 20000.0)
+        self._paper_pos_map: Dict[str, float] = self._load_position_map()
+
+    def _load_position_map(self) -> Dict[str, float]:
+        if not os.path.exists(self.position_file):
+            return {}
+        try:
+            with open(self.position_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            out: Dict[str, float] = {}
+            for p in data.get("positions", []) or []:
+                sym = str(p.get("symbol", "")).strip()
+                if not sym:
+                    continue
+                signed = p.get("notional")
+                if signed is None:
+                    mv = float(p.get("market_value", 0) or 0)
+                    side = str(p.get("side", "LONG")).upper()
+                    signed = -mv if side == "SHORT" else mv
+                out[sym] = float(signed or 0)
+            return out
+        except Exception:
+            return {}
+
+    def _dump_position_map(self):
+        os.makedirs(os.path.dirname(self.position_file), exist_ok=True)
+        total_asset = max(self.paper_total_asset, 1e-8)
+        positions: List[Dict] = []
+        for sym, notional in self._paper_pos_map.items():
+            if abs(notional) < 1e-8:
+                continue
+            positions.append(
+                {
+                    "symbol": sym,
+                    "notional": round(float(notional), 6),
+                    "market_value": round(float(abs(notional)), 6),
+                    "side": "SHORT" if notional < 0 else "LONG",
+                    "weight": round(float(notional / total_asset), 6),
+                }
+            )
+        with open(self.position_file, 'w', encoding='utf-8') as f:
+            json.dump({"positions": positions}, f, ensure_ascii=False, indent=2)
+
     def connect(self) -> bool:
         self.logger.info("[Crypto PAPER] 模拟交易模式")
         self.is_connected = True
         return True
-    
+
     def disconnect(self):
         self.is_connected = False
-    
+
     def get_account_info(self) -> Dict:
+        used_notional = float(sum(abs(v) for v in self._paper_pos_map.values()))
+        available = max(0.0, self.paper_total_asset - used_notional)
         return {
             "account_id": "CRYPTO_PAPER",
-            "available_cash": 20000.0,  # USDT
-            "total_asset": 20000.0,
+            "available_cash": available,
+            "total_asset": self.paper_total_asset,
         }
-    
+
     def get_positions(self) -> List[Dict]:
-        pos_file = self.config.get("position_file", "./outputs/state/crypto_positions.json")
-        if os.path.exists(pos_file):
-            with open(pos_file, 'r', encoding='utf-8') as f:
+        self._dump_position_map()
+        if os.path.exists(self.position_file):
+            with open(self.position_file, 'r', encoding='utf-8') as f:
                 return json.load(f).get("positions", [])
         return []
-    
+
     def place_order(self, order: Order) -> Order:
         order.order_id = f"PAPER_CRYPTO_{int(time.time() * 1000)}"
         order.status = OrderStatus.FILLED
         order.filled_amount = order.amount
         order.created_at = datetime.now().isoformat()
         order.updated_at = order.created_at
+
+        delta = float(order.amount or 0)
+        if order.side == OrderSide.SELL:
+            delta = -delta
+        cur = float(self._paper_pos_map.get(order.symbol, 0.0))
+        nxt = cur + delta
+        if abs(nxt) < 1e-8:
+            self._paper_pos_map.pop(order.symbol, None)
+        else:
+            self._paper_pos_map[order.symbol] = nxt
+        self._dump_position_map()
+
         self.logger.info(f"[Crypto PAPER] 模拟下单: {order.side.value} {order.symbol} {order.amount}")
         return order
-    
+
     def cancel_order(self, order_id: str) -> bool:
         return True
-    
+
     def get_order_status(self, order_id: str) -> OrderStatus:
         return OrderStatus.FILLED
 

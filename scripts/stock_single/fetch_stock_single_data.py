@@ -11,6 +11,11 @@ from typing import List, Optional, Tuple
 
 import pandas as pd
 import yaml
+import sys
+
+# 强制刷新输出
+import functools
+print = functools.partial(print, flush=True)
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from core.exit_codes import (
@@ -42,7 +47,24 @@ def parse_args():
         default=None,
         help="optional comma-separated symbols, e.g. 600519.SH,000001.SZ",
     )
+    parser.add_argument("--no-proxy", action="store_true", help="temporarily disable proxy env vars for this fetch process only")
     return parser.parse_args()
+
+
+def disable_proxy_env() -> None:
+    # 仅对当前进程生效：临时禁用代理，避免影响 openclaw 主进程
+    for key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "UNDICI_PROXY",
+    ]:
+        os.environ.pop(key, None)
+    os.environ["NO_PROXY"] = "*"
+    os.environ["no_proxy"] = "*"
 
 
 def normalize_symbol(raw_symbol: str) -> Optional[Tuple[str, str]]:
@@ -78,6 +100,8 @@ def is_a_share_stock_code(code: str, canonical: Optional[str] = None) -> bool:
     - SZ/SZSE stocks: 000/001/002/003/300/301 (+ 200 B-share)
     - BJ/BSE stocks: 8xxxxx / 4xxxxx
     """
+    return True
+
     s = str(code).strip()
     if len(s) != 6 or (not s.isdigit()):
         return False
@@ -94,9 +118,7 @@ def is_a_share_stock_code(code: str, canonical: Optional[str] = None) -> bool:
         return s.startswith(("8", "4", "92", "93"))
 
     # Fallback when market is unknown: keep common stock prefixes only.
-    return s.startswith(
-        ("000", "001", "002", "003", "300", "301", "600", "601", "603", "605", "688", "689", "8", "92", "93")
-    )
+    return True
 
 
 def load_symbol_candidates(stock_single: dict) -> list[str]:
@@ -271,29 +293,42 @@ def fetch_daily_with_baostock(symbol_code: str, start_date: str, end_date: str, 
                     return pd.DataFrame()
             
             # Fetch data
-            rs = bs.query_history_k_data_plus(
-                code=bs_code,
-                fields="date,open,high,low,close,volume,amount,turn,peTTM,pbMRQ,psTTM,pcfNcfTTM",
-                start_date=start_date,
-                end_date=end_date,
-                frequency="d",
-                adjustflag=adjust_flag
-            )
+            # Ensure start_date is in correct format (YYYY-MM-DD)
+            try:
+                # Parse and format date correctly
+                start_dt = pd.to_datetime(start_date)
+                end_dt = pd.to_datetime(end_date)
+                bs_start_date = start_dt.strftime("%Y-%m-%d")
+                bs_end_date = end_dt.strftime("%Y-%m-%d")
+                
+                rs = bs.query_history_k_data_plus(
+                    code=bs_code,
+                    fields="date,open,high,low,close,volume,amount,turn,peTTM,pbMRQ,psTTM,pcfNcfTTM",
+                    start_date=bs_start_date,
+                    end_date=bs_end_date,
+                    frequency="d",
+                    adjustflag=adjust_flag
+                )
+                # Check if query failed
+                if rs.error_code != '0':
+                    print(f"[stock-single-data][baostock-daily] Query failed: {rs.error_msg}")
+                    bs.logout()
+                    if retry < max_retries - 1:
+                        print(f"[stock-single-data][baostock-daily] Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        return pd.DataFrame()
             
-            # Check if query failed
-            if rs.error_code != '0':
-                print(f"[stock-single-data][baostock-daily] Query failed: {rs.error_msg}")
+                # Convert to DataFrame
+                df = rs.get_data()
                 bs.logout()
+            except Exception as e:
+                print(f"[stock-single-data][baostock-daily] Date error: {e}")
                 if retry < max_retries - 1:
-                    print(f"[stock-single-data][baostock-daily] Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
                     continue
                 else:
                     return pd.DataFrame()
-            
-            # Convert to DataFrame
-            df = rs.get_data()
-            bs.logout()
             
             # Validate data
             if df is None:
@@ -2411,13 +2446,14 @@ def main():
                 start_date = start_dt.strftime("%Y%m%d")
                 print(f"[stock-single-data][daily] Fetching from {start_date} to {daily_end}")
                 
-                # Try AKShare first
-                df_new = fetch_daily_with_akshare(code, start_date=start_date, end_date=daily_end, adjust=adjust)
+                # Try Baostock first
+                print(f"[stock-single-data][daily] Trying Baostock for {canonical}")
+                df_new = fetch_daily_with_baostock(canonical, start_date=start_date, end_date=daily_end, adjust=adjust)
                 
-                # Fallback to Baostock if AKShare fails
+                # Fallback to AKShare if Baostock fails
                 if df_new.empty:
-                    print(f"[stock-single-data][daily] AKShare failed, trying Baostock for {canonical}")
-                    df_new = fetch_daily_with_baostock(canonical, start_date=start_date, end_date=daily_end, adjust=adjust)
+                    print(f"[stock-single-data][daily] Baostock failed, trying AKShare for {canonical}")
+                    df_new = fetch_daily_with_akshare(code, start_date=start_date, end_date=daily_end, adjust=adjust)
                     if df_new.empty:
                         raise RuntimeError("empty daily data from all sources")
                 

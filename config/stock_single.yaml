@@ -1,4 +1,4 @@
-enabled: false
+enabled: true
 market: CN_STOCK_SINGLE
 mode: single_stock_hourly
 
@@ -60,7 +60,7 @@ data_guard:
   max_cache_age_days_fund_flow_proxy: 30
 
 pool:
-  source_file: ./data/stock_single/universe.csv
+  source_file: ./data/stock_single/universe_resume_v3.csv
   symbol_column: symbol
   static_fallback: []
   selection:

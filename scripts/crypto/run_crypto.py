@@ -552,14 +552,29 @@ def main():
 
     # 企业微信通知：目标仓位 + 风控状态
     try:
-        tgt = ", ".join([f"{x['symbol']}:{x['target_weight']:.2f}" for x in out.get("targets", [])]) or "无"
+        tgt_list = [f"{x['symbol']}:{x['target_weight']:.2f}" for x in out.get("targets", [])]
+        tgt = ", ".join(tgt_list) or "无"
+        
+        # 仅在有仓位或仓位变化时发送（简单判断：若 targets 为空且 risk_off 为假且 regime 为 neutral，可能是静默期）
+        # 但为了让用户知道“为什么空仓”，我们需要丰富 context
+        
         lines = [
             f"时间: {out.get('ts','')}",
-            f"市场: crypto",
-            f"risk_off: {out.get('risk_off', False)}",
+            f"市场: crypto ({out.get('market_type','unknown')})",
+            f"状态: {out.get('regime_state', 'unknown')} (RiskOff: {out.get('risk_off', False)})",
             f"目标仓位: {tgt}",
         ]
-        ok, msg = safe_send_wecom_message("\n".join(lines), title="目标仓位更新")
+        
+        # 增加行情摘要（Debug 空仓原因）
+        if not out.get("targets"):
+            avg_mom = out.get("avg_momentum")
+            breadth = out.get("trend_breadth")
+            scores = out.get("scores", [])
+            top_score = scores[0]['score'] if scores else 0.0
+            lines.append(f"原因摘要: 趋势广度 {breadth} (需>0.5), 平均动量 {avg_mom}")
+            lines.append(f"Top1评分: {top_score:.4f}")
+        
+        ok, msg = safe_send_wecom_message("\n".join(lines), title="Crypto 策略信号")
         print(f"[notify] wecom {'ok' if ok else 'fail'}: {msg}")
         if out.get("risk_off", False):
             safe_send_wecom_message(
