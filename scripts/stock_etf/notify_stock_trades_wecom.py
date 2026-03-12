@@ -132,14 +132,16 @@ def _fmt_positions(title: str, positions: List[Dict[str, Any]]) -> List[str]:
 
 
 def _load_latest_execution_record() -> Dict[str, Any]:
-    files = glob.glob("./outputs/orders/execution_record_*.json")
-    if not files:
-        return {}
-    latest = max(files, key=os.path.getmtime)
-    try:
-        return load_json(latest)
-    except Exception:
-        return {}
+    files = sorted(glob.glob("./outputs/orders/execution_record_*.json"), key=os.path.getmtime, reverse=True)
+    for fp in files:
+        try:
+            rec = load_json(fp)
+        except Exception:
+            continue
+        # 只使用股票执行记录，避免误读到 crypto 的 execution_record
+        if str(rec.get("market", "")).strip().lower() == "stock":
+            return rec
+    return {}
 
 
 def build_trade_message(trades: Dict[str, Any], stale_position_hours: int = 36) -> str:
@@ -191,7 +193,7 @@ def build_trade_message(trades: Dict[str, Any], stale_position_hours: int = 36) 
     lines.append("")
     lines.append("持仓校验:")
     lines.extend(pos_lines)
-    lines.append("说明: 指令基于本地持仓差分生成，请以券商端最终可成交结果为准。")
+    lines.append("说明: 当前按纸面交易执行，指令发出即视为成交；请人工在券商端同步执行。")
     return "\n".join(lines)
 
 
