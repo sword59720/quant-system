@@ -27,6 +27,8 @@ class BacktestEngine:
         
     def load_data(self):
         print("Loading data...")
+        if not os.path.isdir(self.data_dir):
+            raise RuntimeError(f"data directory not found: {self.data_dir}")
         for f in os.listdir(self.data_dir):
             if f.endswith('.csv'):
                 symbol = f.replace('_', '/')
@@ -35,6 +37,8 @@ class BacktestEngine:
                 df['date'] = pd.to_datetime(df['date'])
                 df = df.sort_values('date')
                 self.data_cache[symbol.replace('.csv', '')] = df
+        if not self.data_cache:
+            raise RuntimeError(f"no symbol data loaded from: {self.data_dir}")
         print(f"Loaded {len(self.data_cache)} symbols")
 
     def get_price(self, symbol, date):
@@ -48,6 +52,8 @@ class BacktestEngine:
 
     def run(self, strategy):
         print("Running backtest...")
+        if not self.data_cache:
+            raise RuntimeError("no loaded data for backtest")
         
         # 生成时间轴 (4小时)
         current = self.start_date
@@ -96,13 +102,15 @@ class BacktestEngine:
         return pd.DataFrame(self.history)
 
     def analyze(self, df):
+        if df.empty or len(df) < 2:
+            raise RuntimeError("backtest history too short")
         df['ret'] = df['equity'].pct_change()
         
         total_ret = (df['equity'].iloc[-1] / df['equity'].iloc[0]) - 1
         days = (df['date'].iloc[-1] - df['date'].iloc[0]).days
         ann_ret = (1 + total_ret) ** (365 / days) - 1
         vol = df['ret'].std() * np.sqrt(365 * 6) # 4h bar
-        sharpe = (ann_ret - 0.02) / vol
+        sharpe = (ann_ret - 0.02) / vol if vol > 1e-12 else 0.0
         
         # Max Drawdown
         df['max_equity'] = df['equity'].cummax()
@@ -138,9 +146,10 @@ if __name__ == "__main__":
         'risk_off_threshold': 0.0
     }
     
+    default_data_dir = "./data/crypto" if os.path.isdir("./data/crypto") else "./data/crypto_history"
     strategy = AdaptiveMomentumStrategy(params)
     engine = BacktestEngine(
-        data_dir="./data/crypto_history",
+        data_dir=default_data_dir,
         start_date="2021-01-01",
         end_date=datetime.now().strftime("%Y-%m-%d")
     )

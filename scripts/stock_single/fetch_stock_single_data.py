@@ -11,7 +11,6 @@ from typing import List, Optional, Tuple
 
 import pandas as pd
 import yaml
-import sys
 
 # 强制刷新输出
 import functools
@@ -100,8 +99,6 @@ def is_a_share_stock_code(code: str, canonical: Optional[str] = None) -> bool:
     - SZ/SZSE stocks: 000/001/002/003/300/301 (+ 200 B-share)
     - BJ/BSE stocks: 8xxxxx / 4xxxxx
     """
-    return True
-
     s = str(code).strip()
     if len(s) != 6 or (not s.isdigit()):
         return False
@@ -118,19 +115,39 @@ def is_a_share_stock_code(code: str, canonical: Optional[str] = None) -> bool:
         return s.startswith(("8", "4", "92", "93"))
 
     # Fallback when market is unknown: keep common stock prefixes only.
-    return True
+    return s.startswith(
+        ("000", "001", "002", "003", "300", "301", "600", "601", "603", "605", "688", "689", "8", "92", "93")
+    )
+
+
+def _resolve_symbol_source_file(pool_cfg: dict) -> Optional[str]:
+    configured = str(pool_cfg.get("source_file", "./data/stock_single/universe.csv"))
+    candidates = [configured]
+    default_file = "./data/stock_single/universe.csv"
+    if os.path.normpath(configured) != os.path.normpath(default_file):
+        candidates.append(default_file)
+    # Resume file missing时自动回退到标准universe文件
+    if "resume" in os.path.basename(configured).lower():
+        resume_fallback = os.path.join(os.path.dirname(configured) or ".", "universe.csv")
+        if os.path.normpath(resume_fallback) not in {os.path.normpath(x) for x in candidates}:
+            candidates.append(resume_fallback)
+
+    for fp in candidates:
+        if os.path.exists(fp):
+            return fp
+    return None
 
 
 def load_symbol_candidates(stock_single: dict) -> list[str]:
     pool_cfg = stock_single.get("pool", {})
-    src = str(pool_cfg.get("source_file", "./data/stock_single/universe.csv"))
+    src = _resolve_symbol_source_file(pool_cfg)
     col = str(pool_cfg.get("symbol_column", "symbol"))
     symbols = []
 
-    if os.path.exists(src):
-        df = pd.read_csv(src)
+    if src:
+        df = pd.read_csv(str(src))
         if col not in df.columns:
-            raise RuntimeError(f"pool source missing column: {col}")
+            raise RuntimeError(f"pool source missing column: {col} ({src})")
         symbols = df[col].dropna().astype(str).tolist()
 
     if not symbols:
@@ -2285,6 +2302,8 @@ def main():
         Exit code
     """
     args = parse_args()
+    if args.no_proxy:
+        disable_proxy_env()
     
     # Start time for performance tracking
     start_time = datetime.now()

@@ -56,12 +56,24 @@ def _first_existing_col(df: pd.DataFrame, candidates: List[str]) -> str:
 
 
 def load_candidate_table(pool_cfg: dict) -> pd.DataFrame:
-    source_file = pool_cfg.get("source_file", "./data/stock_single/universe.csv")
+    configured = str(pool_cfg.get("source_file", "./data/stock_single/universe.csv"))
+    source_candidates = [configured]
+    default_file = "./data/stock_single/universe.csv"
+    if os.path.normpath(configured) != os.path.normpath(default_file):
+        source_candidates.append(default_file)
+    if "resume" in os.path.basename(configured).lower():
+        resume_fallback = os.path.join(os.path.dirname(configured) or ".", "universe.csv")
+        norm_set = {os.path.normpath(x) for x in source_candidates}
+        if os.path.normpath(resume_fallback) not in norm_set:
+            source_candidates.append(resume_fallback)
+
     symbol_column = pool_cfg.get("symbol_column", "symbol")
-    if os.path.exists(source_file):
+    for source_file in source_candidates:
+        if not os.path.exists(source_file):
+            continue
         df = pd.read_csv(source_file)
         if symbol_column not in df.columns:
-            raise RuntimeError(f"pool source missing column: {symbol_column}")
+            raise RuntimeError(f"pool source missing column: {symbol_column} ({source_file})")
         out = pd.DataFrame({"raw_symbol": df[symbol_column].astype(str)})
         name_col = _first_existing_col(df, ["name", "名称", "证券简称"])
         industry_col = _first_existing_col(df, ["industry", "所属行业", "行业"])

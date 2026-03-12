@@ -7,6 +7,7 @@ import pandas as pd
 import akshare as ak
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def ensure_dir(path):
     os.makedirs(path, exist_ok=True)
@@ -137,8 +138,7 @@ def fetch_universe():
     clean_df = clean_df.drop_duplicates(subset=["symbol"], keep="first")
     
     # 导出
-    # out_dir = "./data/stock_single"  # 相对路径可能有问题
-    out_dir = "/home/haojc/.openclaw/workspace/quant-system/data/stock_single"
+    out_dir = os.path.join(PROJECT_ROOT, "data", "stock_single")
     ensure_dir(out_dir)
     out_file = os.path.join(out_dir, "universe.csv")
     

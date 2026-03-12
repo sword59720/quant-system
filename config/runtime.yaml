@@ -9,7 +9,6 @@ stock_brokers:
 timezone: Asia/Shanghai
 base_currency: CNY
 total_capital: 100000
-env: live
 # 2026-02-27 reset details:
 # 159949: 32000 shares @ 1.5490
 # 518880: 4500 shares @ 10.9340
