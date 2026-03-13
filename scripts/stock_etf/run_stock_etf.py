@@ -1825,20 +1825,17 @@ def main():
         ok, msg = send_wecom_message("\n".join(lines), title="目标仓位更新")
         print(f"[notify] wecom {'ok' if ok else 'fail'}: {msg}")
 
-        # 风控异常处罚通知
+        # 风控异常触发通知
         overlay = out.get("risk_overlay", {})
         guard = out.get("execution_guard", {})
-        punish = False
-        reason = []
+        triggered_rules = []
         if overlay.get("state_active", False) or overlay.get("triggered", False):
-            punish = True
-            reason.append(f"risk_overlay={overlay.get('reason', 'active')}")
+            triggered_rules.append(f"risk_overlay（{overlay.get('reason', 'active')}）")
         if guard.get("action") == "hold":
-            punish = True
-            reason.append(f"execution_guard={guard.get('reason','hold')}")
-        if punish:
+            triggered_rules.append(f"execution_guard（{guard.get('reason','hold')}）")
+        if triggered_rules:
             send_wecom_message(
-                "风控处罚触发：" + ", ".join(reason) + f"\n当前目标仓位: {tgt}",
+                "风控触发：" + "、".join(triggered_rules) + f"\n当前目标仓位: {tgt}",
                 title="风控状态异常触发",
                 dedup_key="risk_stock_trigger",
                 dedup_hours=24,

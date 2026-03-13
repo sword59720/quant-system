@@ -123,15 +123,15 @@ def _position_hint(position_file: str, stale_hours: int) -> Tuple[List[str], boo
 def _fmt_positions(title: str, positions: List[Dict[str, Any]]) -> List[str]:
     lines = [title]
     if not positions:
-        lines.append("  (空仓)")
+        lines.append(" • (空仓)")
         return lines
     for p in positions:
         sym = str(p.get("symbol", "")).strip()
         w = p.get("weight")
         qty = p.get("quantity")
-        row = f"  - {sym} {_fmt_weight(safe_float(w))}" if w is not None else f"  - {sym}"
+        row = f" • {sym}: {_fmt_weight(safe_float(w))}" if w is not None else f" • {sym}"
         if qty is not None:
-            row += f" / {qty}股"
+            row += f", {qty}股"
         lines.append(row)
     return lines
 
@@ -146,47 +146,42 @@ def build_trade_message(trades: Dict[str, Any], stale_position_hours: int = 36) 
     target_positions = trades.get("target_positions", []) or []
     estimated_after_positions = trades.get("estimated_after_positions", []) or []
 
+    date_text = _safe_iso_date(ts, now_in_timezone("Asia/Shanghai").strftime("%Y-%m-%d"))
     lines = [
-        f"时间: {ts}",
-        f"总资金: ¥{capital_total:,.2f}",
-        f"股票资金: ¥{capital_market:,.2f}",
+        f"日期: {date_text}",
         f"执行模式: paper_manual",
+        f"总资金基准: ¥{capital_total:,.0f}",
     ]
 
-    lines.append("")
     lines.extend(_fmt_positions("当前仓位:", current_positions))
 
     if orders:
-        lines.append("")
         lines.extend(_fmt_positions("目标仓位:", target_positions))
-        lines.extend(_fmt_positions("预计调仓后仓位:", estimated_after_positions))
         lines.append("调仓指令:")
-        for idx, order in enumerate(orders, 1):
+        sell_orders = [o for o in orders if str(o.get("action", "")).upper() == "SELL"]
+        buy_orders = [o for o in orders if str(o.get("action", "")).upper() == "BUY"]
+        ordered = sell_orders + buy_orders
+        for idx, order in enumerate(ordered, 1):
             symbol = str(order.get("symbol", "")).strip()
             action = str(order.get("action", "BUY")).strip().upper()
             amount = safe_float(order.get("amount_quote"))
-            current_weight = safe_float(order.get("current_weight"), 0.0)
-            target_weight = safe_float(order.get("target_weight"), 0.0)
-            delta_weight_val = order.get("delta_weight")
-            delta_weight = None if delta_weight_val is None else safe_float(delta_weight_val, 0.0)
             ref_price = order.get("ref_price")
             est_shares = order.get("estimated_shares")
             est_lots = order.get("estimated_lots")
-            extra = ""
-            if ref_price is not None and est_shares is not None and est_lots is not None:
-                extra = f" 参考价≈{safe_float(ref_price):.3f} 数量≈{int(est_shares)}股({int(est_lots)}手)"
-            lines.append(
-                f"{idx}. {action:<4} {symbol} 金额¥{amount:,.2f} 仓位 {_fmt_weight(current_weight)} -> {_fmt_weight(target_weight)} (Δ{_fmt_weight_delta(delta_weight)}){extra}"
-            )
+            line = f" {idx}. {action} {symbol} 金额≈¥{amount:,.0f}"
+            if ref_price is not None:
+                line += f" 参考价≈{safe_float(ref_price):.3f}"
+            if est_shares is not None and est_lots is not None:
+                line += f" 估算数量≈{int(est_shares)}股({int(est_lots)}手)"
+            lines.append(line)
     else:
-        lines.append("")
-        lines.append("今日无调仓，维持当前仓位。")
+        lines.append("调仓指令:")
+        lines.append(" 今日无调仓，维持当前仓位。")
 
     pos_lines, _ = _position_hint(position_file, stale_hours=stale_position_hours)
-    lines.append("")
-    lines.append("持仓校验:")
-    lines.extend(pos_lines)
-    lines.append("说明: 当前按纸面交易执行；请人工在券商端同步执行，完成后及时更新 stock_positions.json。")
+    if pos_lines:
+        lines.extend(pos_lines)
+    lines.append("说明: 实际成交请以盘中价格为准。执行后请更新 stock_positions.json。")
     return "\n".join(lines)
 
 
