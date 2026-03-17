@@ -29,7 +29,7 @@ global_model:
       score_mix: 0.00
       score_floor: 0.00
       score_power: 0.85
-      alloc_mult: 1.05
+      alloc_mult: 1.08
       turbo_enabled: false
       turbo_trend_strength_min: 0.03
       turbo_breadth_min: 0.78
@@ -149,7 +149,7 @@ global_model:
       stress_add: 0.05
   dual_layer_budget:
     enabled: true
-    risk_on_base_mult: 1.10
+    risk_on_base_mult: 1.14
     neutral_base_mult: 0.95
     risk_off_base_mult: 0.32
     strong_trend_threshold: 0.06
@@ -158,7 +158,7 @@ global_model:
     weak_trend_mult: 0.92
     strong_breadth_threshold: 0.64
     weak_breadth_threshold: 0.36
-    strong_breadth_mult: 1.06
+    strong_breadth_mult: 1.10
     weak_breadth_mult: 0.88
     drawdown_window: 60
     mild_drawdown_trigger: -0.06
