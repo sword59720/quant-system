@@ -3,7 +3,8 @@ market: CN_STOCK
 mode: global_momentum
 backtest_mode: production  # production | research
 
-capital_alloc_pct: 1.00
+# Aggressive profile cloned from the 2026-02-24 strong baseline.
+capital_alloc_pct: 0.90
 
 benchmark_symbol: "510300"
 defensive_symbol: "518880"
@@ -15,33 +16,11 @@ global_model:
   vol_window: 35
   warmup_min_days: 126
   top_n: 2
-  benchmark_tradeable: false
   fee: 0.0008
   min_score: 0.04
   risk_on_score_mix: 0.1
   risk_on_score_floor: 0.01
   risk_on_score_power: 0.7
-  regime_profiles:
-    enabled: true
-    risk_on:
-      top_n: 3
-      min_score: 0.01
-      score_mix: 0.00
-      score_floor: 0.00
-      score_power: 0.85
-      alloc_mult: 1.05
-      turbo_enabled: false
-      turbo_trend_strength_min: 0.03
-      turbo_breadth_min: 0.78
-      turbo_alloc_mult_add: 0.05
-      turbo_top_n_add: 1
-    neutral:
-      top_n: 1
-      min_score: 0.06
-      score_mix: 0.00
-      score_floor: 0.00
-      score_power: 1.20
-      alloc_mult: 0.70
   structural_upgrade:
     enabled: true
     momentum_windows: [20, 60, 180]
@@ -52,7 +31,7 @@ global_model:
     relative_momentum_weight: 0.00
     asset_trend_ma_window: 80
     breadth_on_threshold: 0.55
-    breadth_off_threshold: 0.10
+    breadth_off_threshold: 0.15
     neutral_alloc_mult: 1.00
     neutral_top_n: 2
     trend_strength_k: 2.0
@@ -69,15 +48,15 @@ global_model:
     phase2_vol_stress_ratio: 1.10
     phase2_vol_mult_calm: 1.10
     phase2_vol_mult_normal: 1.00
-    phase2_vol_mult_stress: 0.90
+    phase2_vol_mult_stress: 0.85
     phase2_stress_regime_stepdown: 0
     phase2_recovery_enabled: true
     phase2_recovery_window: 180
     phase2_recovery_trigger_drawdown: -0.10
     phase2_recovery_momentum_window: 20
     phase2_recovery_max_mult: 1.10
-    phase2_total_mult_min: 0.60
-    phase2_total_mult_max: 1.20
+    phase2_total_mult_min: 0.70
+    phase2_total_mult_max: 1.25
     phase2_adaptive_enabled: true
     phase2_adaptive_min_top_n: 1
     phase2_adaptive_max_top_n: 5
@@ -109,7 +88,7 @@ global_model:
   risk_governor:
     enabled: true
     vol_window: 20
-    target_daily_vol: 0.0110
+    target_daily_vol: 0.011
     min_alloc_mult: 0.45
     max_alloc_mult: 0.95
     dd_window: 100
@@ -118,40 +97,6 @@ global_model:
     momentum_window: 40
     momentum_trigger: 0.0
     momentum_alloc_mult: 1.00
-  defensive_rotation:
-    enabled: true
-    symbols: ["518880", "511010", "511990"]
-    top_n: 1
-    momentum_windows: [20, 60, 120]
-    momentum_weights: [0.50, 0.30, 0.20]
-    vol_window: 20
-    trend_ma_window: 60
-    min_momentum: -0.01
-    trend_filter: true
-    score_power: 1.0
-  dual_layer_budget:
-    enabled: true
-    risk_on_base_mult: 1.10
-    neutral_base_mult: 0.95
-    risk_off_base_mult: 0.32
-    strong_trend_threshold: 0.06
-    weak_trend_threshold: 0.00
-    strong_trend_mult: 1.08
-    weak_trend_mult: 0.92
-    strong_breadth_threshold: 0.64
-    weak_breadth_threshold: 0.36
-    strong_breadth_mult: 1.06
-    weak_breadth_mult: 0.88
-    drawdown_window: 60
-    mild_drawdown_trigger: -0.06
-    hard_drawdown_trigger: -0.10
-    mild_drawdown_mult: 0.92
-    hard_drawdown_mult: 0.72
-    recovery_window: 20
-    recovery_threshold: 0.05
-    recovery_mult: 1.04
-    total_mult_min: 0.30
-    total_mult_max: 1.25
   risk_overlay:
     enabled: true
     monitor_file: ./outputs/reports/stock_paper_forward_latest.json
@@ -177,26 +122,10 @@ global_model:
       pass: 0.70
       warn: 0.60
       risk: 0.50
-  symbol_weight_caps:
-    "159610": 0.25
-    "159633": 0.25
-    "159819": 0.22
-    "512480": 0.25
-    "513100": 0.25
-    "513500": 0.20
 
 universe:
-  - "159610" #电池ETF
-  - "159633" #新能车ETF
   - "159915" #创业板ETF
-  - "159949" #创业板50ETF
-  - "159819" #人工智能ETF
-  - "510300" #沪深300ETF
-  - "510500" #中证500ETF
-  - "512100" #中证1000ETF
-  - "512480" #半导体ETF
   - "513100" #纳指ETF
-  - "513500" #标普500ETF
   - "518880" #黄金ETF
 
 signal:
@@ -221,12 +150,6 @@ validation:
         min_fold_days: 80
       oos_2023:
         start_date: "2023-01-03"
-        n_groups: 8
-        test_groups: 3
-        embargo_days: 15
-        min_fold_days: 60
-      oos_2025:
-        start_date: "2025-01-02"
         n_groups: 8
         test_groups: 3
         embargo_days: 15

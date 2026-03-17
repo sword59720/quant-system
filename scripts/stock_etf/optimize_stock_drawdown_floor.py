@@ -66,12 +66,23 @@ def compute_window_metrics(df: pd.DataFrame, start_date: Optional[str]) -> dict:
             "strategy_sharpe": 0.0,
         }
 
-    strategy_nav = pd.Series([1.0] + x["strategy_nav"].tolist())
+    tmp = x[["strategy_ret"]].copy()
+    tmp["strategy_ret"] = pd.to_numeric(tmp["strategy_ret"], errors="coerce")
+    tmp = tmp.dropna().reset_index(drop=True)
+    if len(tmp) < 2:
+        return {
+            "rows": int(len(tmp)),
+            "strategy_annual_return": 0.0,
+            "strategy_max_drawdown": 0.0,
+            "strategy_sharpe": 0.0,
+        }
+
+    strategy_nav = pd.concat([pd.Series([1.0]), (1.0 + tmp["strategy_ret"]).cumprod()], ignore_index=True)
     return {
-        "rows": int(len(x)),
+        "rows": int(len(tmp)),
         "strategy_annual_return": float(annualized_return(strategy_nav, 252)),
         "strategy_max_drawdown": float(max_drawdown(strategy_nav)),
-        "strategy_sharpe": float(sharpe_ratio(x["strategy_ret"], 252)),
+        "strategy_sharpe": float(sharpe_ratio(tmp["strategy_ret"], 252)),
     }
 
 

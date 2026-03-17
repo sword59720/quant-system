@@ -24,9 +24,10 @@ from core.exit_codes import (
 )
 from scripts.stock_etf.paper_forward_stock import run_paper_forward
 
-TARGET_ANNUAL_RETURN = 0.20
-TARGET_MAX_DRAWDOWN = -0.10
-TARGET_SHARPE = 1.00
+DEFAULT_TARGET_ANNUAL_RETURN = 0.20
+DEFAULT_TARGET_MAX_DRAWDOWN = -0.10
+DEFAULT_TARGET_SHARPE = 1.00
+DEFAULT_TARGET_WINDOW = "full"
 
 
 def load_yaml(path):
@@ -75,19 +76,35 @@ def compute_window_metrics(df: pd.DataFrame, start_date: Optional[str]) -> dict:
             "benchmark_sharpe_alloc": 0.0,
         }
 
-    strategy_nav = pd.Series([1.0] + x["strategy_nav"].tolist())
-    benchmark_nav = pd.Series([1.0] + x["benchmark_nav_alloc"].tolist())
+    tmp = x[["strategy_ret", "benchmark_ret_alloc"]].copy()
+    tmp["strategy_ret"] = pd.to_numeric(tmp["strategy_ret"], errors="coerce")
+    tmp["benchmark_ret_alloc"] = pd.to_numeric(tmp["benchmark_ret_alloc"], errors="coerce")
+    tmp = tmp.dropna().reset_index(drop=True)
+    if len(tmp) < 2:
+        return {
+            "rows": int(len(tmp)),
+            "strategy_annual_return": 0.0,
+            "benchmark_annual_return_alloc": 0.0,
+            "excess_annual_return_vs_alloc": 0.0,
+            "strategy_max_drawdown": 0.0,
+            "benchmark_max_drawdown_alloc": 0.0,
+            "strategy_sharpe": 0.0,
+            "benchmark_sharpe_alloc": 0.0,
+        }
+
+    strategy_nav = pd.concat([pd.Series([1.0]), (1.0 + tmp["strategy_ret"]).cumprod()], ignore_index=True)
+    benchmark_nav = pd.concat([pd.Series([1.0]), (1.0 + tmp["benchmark_ret_alloc"]).cumprod()], ignore_index=True)
     strategy_ann = annualized_return(strategy_nav, 252)
     benchmark_ann = annualized_return(benchmark_nav, 252)
     return {
-        "rows": int(len(x)),
+        "rows": int(len(tmp)),
         "strategy_annual_return": float(strategy_ann),
         "benchmark_annual_return_alloc": float(benchmark_ann),
         "excess_annual_return_vs_alloc": float(strategy_ann - benchmark_ann),
         "strategy_max_drawdown": max_drawdown(strategy_nav),
         "benchmark_max_drawdown_alloc": max_drawdown(benchmark_nav),
-        "strategy_sharpe": sharpe_ratio(x["strategy_ret"], 252),
-        "benchmark_sharpe_alloc": sharpe_ratio(x["benchmark_ret_alloc"], 252),
+        "strategy_sharpe": sharpe_ratio(tmp["strategy_ret"], 252),
+        "benchmark_sharpe_alloc": sharpe_ratio(tmp["benchmark_ret_alloc"], 252),
     }
 
 
@@ -184,18 +201,41 @@ def apply_candidate(stock_cfg: dict, candidate: dict) -> dict:
     return s
 
 
-def evaluate_target(full_metrics: dict) -> dict:
-    ann = float(full_metrics["strategy_annual_return"])
-    mdd = float(full_metrics["strategy_max_drawdown"])
-    shp = float(full_metrics["strategy_sharpe"])
+def build_target_spec(
+    annual_return_min: float,
+    max_drawdown_min: float,
+    sharpe_min: float,
+    window: str,
+) -> dict:
+    target_window = str(window or DEFAULT_TARGET_WINDOW).strip().lower()
+    if target_window not in {"full", "oos_2023", "oos_2024", "oos_2025"}:
+        target_window = DEFAULT_TARGET_WINDOW
+    return {
+        "annual_return_min": float(annual_return_min),
+        "max_drawdown_min": float(max_drawdown_min),
+        "sharpe_min": float(sharpe_min),
+        "target_window": target_window,
+    }
 
-    ann_gap = max(0.0, TARGET_ANNUAL_RETURN - ann)
-    mdd_gap = max(0.0, TARGET_MAX_DRAWDOWN - mdd)
-    shp_gap = max(0.0, TARGET_SHARPE - shp)
 
-    met_ann = ann >= TARGET_ANNUAL_RETURN
-    met_mdd = mdd >= TARGET_MAX_DRAWDOWN
-    met_shp = shp >= TARGET_SHARPE
+def evaluate_target(metrics: dict, target_spec: dict) -> dict:
+    target_window = str(target_spec.get("target_window", DEFAULT_TARGET_WINDOW))
+    target_metrics = metrics.get(target_window, metrics.get("full", {}))
+    ann = float(target_metrics["strategy_annual_return"])
+    mdd = float(target_metrics["strategy_max_drawdown"])
+    shp = float(target_metrics["strategy_sharpe"])
+
+    annual_return_min = float(target_spec.get("annual_return_min", DEFAULT_TARGET_ANNUAL_RETURN))
+    max_drawdown_min = float(target_spec.get("max_drawdown_min", DEFAULT_TARGET_MAX_DRAWDOWN))
+    sharpe_min = float(target_spec.get("sharpe_min", DEFAULT_TARGET_SHARPE))
+
+    ann_gap = max(0.0, annual_return_min - ann)
+    mdd_gap = max(0.0, max_drawdown_min - mdd)
+    shp_gap = max(0.0, sharpe_min - shp)
+
+    met_ann = ann >= annual_return_min
+    met_mdd = mdd >= max_drawdown_min
+    met_shp = shp >= sharpe_min
     met_count = int(met_ann) + int(met_mdd) + int(met_shp)
 
     # Gap weighted by practical importance for this target profile.
@@ -214,20 +254,26 @@ def evaluate_target(full_metrics: dict) -> dict:
             "sharpe": float(shp_gap),
         },
         "gap_score": gap_score,
+        "target_window": target_window,
+        "evaluated_metrics": {
+            "strategy_annual_return": ann,
+            "strategy_max_drawdown": mdd,
+            "strategy_sharpe": shp,
+        },
         "targets": {
-            "annual_return": TARGET_ANNUAL_RETURN,
-            "max_drawdown": TARGET_MAX_DRAWDOWN,
-            "sharpe": TARGET_SHARPE,
+            "annual_return": annual_return_min,
+            "max_drawdown": max_drawdown_min,
+            "sharpe": sharpe_min,
         },
     }
 
 
-def score_candidate(metrics: dict, trades: int) -> tuple[float, dict]:
+def score_candidate(metrics: dict, trades: int, target_spec: dict) -> tuple[float, dict]:
     full_m = metrics["full"]
     o23 = metrics["oos_2023"]
     o24 = metrics["oos_2024"]
     o25 = metrics["oos_2025"]
-    target = evaluate_target(full_m)
+    target = evaluate_target(metrics, target_spec)
 
     robust_ann = (
         0.4 * float(o23["strategy_annual_return"])
@@ -260,7 +306,7 @@ def is_stable(metrics: dict) -> bool:
     )
 
 
-def evaluate_candidate(runtime: dict, stock_cfg: dict, risk_cfg: dict, candidate: dict) -> dict:
+def evaluate_candidate(runtime: dict, stock_cfg: dict, risk_cfg: dict, candidate: dict, target_spec: dict) -> dict:
     eval_stock = apply_candidate(stock_cfg, candidate)
     with tempfile.TemporaryDirectory() as td:
         rt = copy.deepcopy(runtime)
@@ -275,7 +321,7 @@ def evaluate_candidate(runtime: dict, stock_cfg: dict, risk_cfg: dict, candidate
         "oos_2024": compute_window_metrics(df, "2024-01-02"),
         "oos_2025": compute_window_metrics(df, "2025-01-02"),
     }
-    score, target = score_candidate(metrics, int(summary["aggregate"]["trades"]))
+    score, target = score_candidate(metrics, int(summary["aggregate"]["trades"]), target_spec)
     return {
         "params": {
             "capital_alloc_pct": float(candidate["capital_alloc_pct"]),
@@ -436,9 +482,10 @@ def sort_results(results: list[dict]) -> list[dict]:
             bool(x["target"]["all_met"]),
             -float(x["target"]["gap_score"]),
             bool(x["stable_pass"]),
+            float(x["target"]["evaluated_metrics"]["strategy_annual_return"]),
+            float(x["target"]["evaluated_metrics"]["strategy_sharpe"]),
+            float(x["target"]["evaluated_metrics"]["strategy_max_drawdown"]),
             float(x["metrics"]["full"]["strategy_annual_return"]),
-            float(x["metrics"]["full"]["strategy_sharpe"]),
-            float(x["metrics"]["full"]["strategy_max_drawdown"]),
             float(x["metrics"]["oos_2025"]["strategy_annual_return"]),
             -int(x["aggregate"]["trades"]),
             float(x["score"]),
@@ -460,11 +507,18 @@ def pick_recommended(results: list[dict]) -> dict:
     return results[0]
 
 
-def run_stage(stage_name: str, runtime: dict, stock_cfg: dict, risk_cfg: dict, candidates: list[dict]) -> list[dict]:
+def run_stage(
+    stage_name: str,
+    runtime: dict,
+    stock_cfg: dict,
+    risk_cfg: dict,
+    candidates: list[dict],
+    target_spec: dict,
+) -> list[dict]:
     total = len(candidates)
     results = []
     for i, c in enumerate(candidates, 1):
-        result = evaluate_candidate(runtime, stock_cfg, risk_cfg, c)
+        result = evaluate_candidate(runtime, stock_cfg, risk_cfg, c, target_spec)
         result["stage"] = stage_name
         results.append(result)
         if i % 20 == 0 or i == total:
@@ -478,6 +532,30 @@ def main():
         "--output",
         default="outputs/reports/stock_target_optimization_report.json",
         help="output json report path",
+    )
+    parser.add_argument(
+        "--target-annual-return",
+        type=float,
+        default=DEFAULT_TARGET_ANNUAL_RETURN,
+        help="minimum annual return target, e.g. 0.30 for 30%%",
+    )
+    parser.add_argument(
+        "--target-max-drawdown",
+        type=float,
+        default=DEFAULT_TARGET_MAX_DRAWDOWN,
+        help="minimum max drawdown target, e.g. -0.10 for -10%%",
+    )
+    parser.add_argument(
+        "--target-sharpe",
+        type=float,
+        default=DEFAULT_TARGET_SHARPE,
+        help="minimum Sharpe target",
+    )
+    parser.add_argument(
+        "--target-window",
+        choices=["full", "oos_2023", "oos_2024", "oos_2025"],
+        default=DEFAULT_TARGET_WINDOW,
+        help="metric window used to judge whether the target is met",
     )
     args = parser.parse_args()
 
@@ -502,32 +580,73 @@ def main():
     try:
         out_dir = os.path.dirname(args.output) or "."
         ensure_dir(out_dir)
+        target_spec = build_target_spec(
+            annual_return_min=float(args.target_annual_return),
+            max_drawdown_min=float(args.target_max_drawdown),
+            sharpe_min=float(args.target_sharpe),
+            window=str(args.target_window),
+        )
 
         baseline_params = extract_base_candidate(stock_cfg)
-        baseline = evaluate_candidate(runtime, stock_cfg, risk_cfg, baseline_params)
+        baseline = evaluate_candidate(runtime, stock_cfg, risk_cfg, baseline_params, target_spec)
         baseline["stage"] = "baseline"
 
-        s1_results = run_stage("stage1_core_alloc", runtime, stock_cfg, risk_cfg, stage1_candidates(stock_cfg))
+        s1_results = run_stage(
+            "stage1_core_alloc",
+            runtime,
+            stock_cfg,
+            risk_cfg,
+            stage1_candidates(stock_cfg),
+            target_spec,
+        )
         top_core = s1_results[:4]
 
-        s2_results = run_stage("stage2_guard", runtime, stock_cfg, risk_cfg, stage2_candidates(top_core))
+        s2_results = run_stage(
+            "stage2_guard",
+            runtime,
+            stock_cfg,
+            risk_cfg,
+            stage2_candidates(top_core),
+            target_spec,
+        )
         best_stage2 = pick_recommended(s2_results)
 
-        s3_results = run_stage("stage3_local", runtime, stock_cfg, risk_cfg, stage3_candidates(best_stage2))
+        s3_results = run_stage(
+            "stage3_local",
+            runtime,
+            stock_cfg,
+            risk_cfg,
+            stage3_candidates(best_stage2),
+            target_spec,
+        )
         best_stage3 = pick_recommended(s3_results)
 
-        s4_results = run_stage("stage4_exposure", runtime, stock_cfg, risk_cfg, stage4_exposure_candidates(best_stage3))
+        s4_results = run_stage(
+            "stage4_exposure",
+            runtime,
+            stock_cfg,
+            risk_cfg,
+            stage4_exposure_candidates(best_stage3),
+            target_spec,
+        )
 
         all_results = sort_results([baseline] + s1_results + s2_results + s3_results + s4_results)
         recommended = pick_recommended(all_results)
 
         report = {
             "ts": datetime.now().isoformat(),
-            "note": "stock production target optimization (annual>=20%, mdd>=-10%, sharpe>=1.0)",
+            "note": (
+                "stock production target optimization "
+                f"(window={target_spec['target_window']}, "
+                f"annual>={target_spec['annual_return_min']:.2%}, "
+                f"mdd>={target_spec['max_drawdown_min']:.2%}, "
+                f"sharpe>={target_spec['sharpe_min']:.2f})"
+            ),
             "targets": {
-                "annual_return_min": TARGET_ANNUAL_RETURN,
-                "max_drawdown_min": TARGET_MAX_DRAWDOWN,
-                "sharpe_min": TARGET_SHARPE,
+                "annual_return_min": target_spec["annual_return_min"],
+                "max_drawdown_min": target_spec["max_drawdown_min"],
+                "sharpe_min": target_spec["sharpe_min"],
+                "target_window": target_spec["target_window"],
             },
             "baseline": baseline,
             "stages": {

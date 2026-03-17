@@ -9,6 +9,7 @@ import hashlib
 import subprocess
 import pandas as pd
 from datetime import datetime
+from typing import Optional
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from core.exit_codes import (
@@ -810,6 +811,226 @@ def _resolve_regime_profile(
     }
 
 
+def _resolve_defensive_rotation_cfg(model_cfg: dict, fallback_symbol: str) -> dict:
+    cfg = model_cfg.get("defensive_rotation", {}) if isinstance(model_cfg, dict) else {}
+    enabled = bool(cfg.get("enabled", False))
+    raw_symbols = cfg.get("symbols", [fallback_symbol])
+    symbols = _normalize_symbols(list(raw_symbols) + [fallback_symbol])
+    windows = []
+    for x in cfg.get("momentum_windows", [20, 60, 120]):
+        try:
+            w = int(x)
+        except (TypeError, ValueError):
+            continue
+        if w > 1:
+            windows.append(w)
+    if not windows:
+        windows = [20, 60, 120]
+    weights = _normalize_float_weights(cfg.get("momentum_weights", [0.5, 0.3, 0.2]), len(windows))
+    top_n = max(1, int(cfg.get("top_n", 1)))
+    vol_window = max(5, int(cfg.get("vol_window", 20)))
+    trend_ma_window = max(5, int(cfg.get("trend_ma_window", 60)))
+    min_momentum = float(cfg.get("min_momentum", -0.02))
+    trend_filter = bool(cfg.get("trend_filter", True))
+    score_power = max(0.1, float(cfg.get("score_power", 1.0)))
+    return {
+        "enabled": enabled,
+        "symbols": symbols,
+        "top_n": top_n,
+        "momentum_windows": windows,
+        "momentum_weights": weights,
+        "vol_window": vol_window,
+        "trend_ma_window": trend_ma_window,
+        "min_momentum": min_momentum,
+        "trend_filter": trend_filter,
+        "score_power": score_power,
+        "fallback_symbol": str(fallback_symbol),
+    }
+
+
+def _build_defensive_weights(
+    closes: dict,
+    defensive_cfg: dict,
+) -> tuple[dict, dict]:
+    fallback_symbol = str(defensive_cfg.get("fallback_symbol", ""))
+    meta = {
+        "enabled": bool(defensive_cfg.get("enabled", False)),
+        "selected_symbols": [fallback_symbol] if fallback_symbol else [],
+        "candidates": [],
+        "reason": "fallback_default",
+    }
+    if (not meta["enabled"]) or (not fallback_symbol):
+        return ({fallback_symbol: 1.0} if fallback_symbol else {}), meta
+
+    candidates = []
+    for symbol in defensive_cfg.get("symbols", []):
+        close = closes.get(symbol)
+        if close is None:
+            continue
+        need = max(
+            max(defensive_cfg["momentum_windows"]),
+            int(defensive_cfg["vol_window"]),
+            int(defensive_cfg["trend_ma_window"]),
+        ) + 2
+        if len(close) < need:
+            continue
+        momentum = _weighted_momentum(
+            close=close,
+            windows=defensive_cfg["momentum_windows"],
+            weights=defensive_cfg["momentum_weights"],
+        )
+        if momentum is None:
+            continue
+        ret = close.pct_change().dropna().tail(int(defensive_cfg["vol_window"]))
+        vol = float(ret.std()) if len(ret) >= 2 else None
+        if vol is None or vol <= 0:
+            continue
+        ma = float(close.tail(int(defensive_cfg["trend_ma_window"])).mean())
+        trend_ok = bool(close.iloc[-1] >= ma) if ma > 0 else True
+        score = max(float(momentum), float(defensive_cfg["min_momentum"]))
+        if defensive_cfg.get("trend_filter", True) and (not trend_ok):
+            score *= 0.5
+        score = max(score, 0.0) ** float(defensive_cfg["score_power"])
+        candidates.append(
+            {
+                "symbol": symbol,
+                "momentum": float(momentum),
+                "vol": float(vol),
+                "trend_ok": bool(trend_ok),
+                "score": float(score),
+            }
+        )
+
+    meta["candidates"] = candidates
+    if not candidates:
+        return {fallback_symbol: 1.0}, meta
+
+    ranked = sorted(candidates, key=lambda x: (x["score"], x["momentum"]), reverse=True)
+    positive = [x for x in ranked if x["momentum"] >= float(defensive_cfg["min_momentum"])]
+    chosen = positive[: int(defensive_cfg["top_n"])] if positive else []
+    if not chosen:
+        chosen = [min(ranked, key=lambda x: x["vol"])]
+        meta["reason"] = "fallback_low_vol"
+    else:
+        meta["reason"] = "momentum_rotation"
+
+    inv_vol = {x["symbol"]: 1.0 / max(float(x["vol"]), 1e-6) for x in chosen}
+    total_inv = sum(inv_vol.values())
+    if total_inv <= 1e-12:
+        weights = {x["symbol"]: 1.0 / len(chosen) for x in chosen}
+    else:
+        weights = {sym: inv_vol[sym] / total_inv for sym in inv_vol}
+    meta["selected_symbols"] = list(weights.keys())
+    return weights, meta
+
+
+def _resolve_dual_budget_cfg(model_cfg: dict) -> dict:
+    cfg = model_cfg.get("dual_layer_budget", {}) if isinstance(model_cfg, dict) else {}
+    enabled = bool(cfg.get("enabled", False))
+    total_mult_min = float(cfg.get("total_mult_min", 0.30))
+    total_mult_max = float(cfg.get("total_mult_max", 1.35))
+    if total_mult_max < total_mult_min:
+        total_mult_max = total_mult_min
+    return {
+        "enabled": enabled,
+        "risk_on_base_mult": float(cfg.get("risk_on_base_mult", 1.00)),
+        "neutral_base_mult": float(cfg.get("neutral_base_mult", 0.80)),
+        "risk_off_base_mult": float(cfg.get("risk_off_base_mult", 0.35)),
+        "strong_trend_threshold": float(cfg.get("strong_trend_threshold", 0.08)),
+        "weak_trend_threshold": float(cfg.get("weak_trend_threshold", 0.0)),
+        "strong_trend_mult": float(cfg.get("strong_trend_mult", 1.10)),
+        "weak_trend_mult": float(cfg.get("weak_trend_mult", 0.92)),
+        "strong_breadth_threshold": float(cfg.get("strong_breadth_threshold", 0.72)),
+        "weak_breadth_threshold": float(cfg.get("weak_breadth_threshold", 0.45)),
+        "strong_breadth_mult": float(cfg.get("strong_breadth_mult", 1.08)),
+        "weak_breadth_mult": float(cfg.get("weak_breadth_mult", 0.90)),
+        "drawdown_window": max(20, int(cfg.get("drawdown_window", 60))),
+        "mild_drawdown_trigger": float(cfg.get("mild_drawdown_trigger", -0.06)),
+        "hard_drawdown_trigger": float(cfg.get("hard_drawdown_trigger", -0.10)),
+        "mild_drawdown_mult": float(cfg.get("mild_drawdown_mult", 0.92)),
+        "hard_drawdown_mult": float(cfg.get("hard_drawdown_mult", 0.72)),
+        "recovery_window": max(5, int(cfg.get("recovery_window", 20))),
+        "recovery_threshold": float(cfg.get("recovery_threshold", 0.05)),
+        "recovery_mult": float(cfg.get("recovery_mult", 1.05)),
+        "total_mult_min": total_mult_min,
+        "total_mult_max": total_mult_max,
+    }
+
+
+def _compute_dual_budget_multiplier(
+    benchmark_close: pd.Series,
+    regime_state: str,
+    trend_strength: Optional[float],
+    breadth: float,
+    cfg: dict,
+) -> tuple[float, dict]:
+    meta = {
+        "enabled": bool(cfg.get("enabled", False)),
+        "regime_state": str(regime_state),
+        "base_mult": 1.0,
+        "trend_mult": 1.0,
+        "breadth_mult": 1.0,
+        "drawdown_mult": 1.0,
+        "recovery_mult": 1.0,
+        "drawdown_now": None,
+        "recent_return": None,
+        "alloc_mult": 1.0,
+    }
+    if (not meta["enabled"]) or benchmark_close is None or len(benchmark_close) < 5:
+        return 1.0, meta
+
+    base_key = f"{regime_state}_base_mult"
+    base_mult = float(cfg.get(base_key, 1.0))
+    trend_mult = 1.0
+    if trend_strength is not None:
+        if trend_strength >= float(cfg["strong_trend_threshold"]):
+            trend_mult = float(cfg["strong_trend_mult"])
+        elif trend_strength <= float(cfg["weak_trend_threshold"]):
+            trend_mult = float(cfg["weak_trend_mult"])
+
+    breadth_mult = 1.0
+    if breadth >= float(cfg["strong_breadth_threshold"]):
+        breadth_mult = float(cfg["strong_breadth_mult"])
+    elif breadth <= float(cfg["weak_breadth_threshold"]):
+        breadth_mult = float(cfg["weak_breadth_mult"])
+
+    dd_window = int(cfg["drawdown_window"])
+    dd_slice = benchmark_close.tail(dd_window)
+    peak = float(dd_slice.max()) if len(dd_slice) > 0 else float(benchmark_close.iloc[-1])
+    drawdown_now = float(benchmark_close.iloc[-1] / max(peak, 1e-8) - 1.0)
+    drawdown_mult = 1.0
+    if drawdown_now <= float(cfg["hard_drawdown_trigger"]):
+        drawdown_mult = float(cfg["hard_drawdown_mult"])
+    elif drawdown_now <= float(cfg["mild_drawdown_trigger"]):
+        drawdown_mult = float(cfg["mild_drawdown_mult"])
+
+    recovery_mult = 1.0
+    rec_window = int(cfg["recovery_window"])
+    if len(benchmark_close) > rec_window:
+        recent_return = float(benchmark_close.iloc[-1] / benchmark_close.iloc[-1 - rec_window] - 1.0)
+        meta["recent_return"] = recent_return
+        if (recent_return >= float(cfg["recovery_threshold"])) and (regime_state == "risk_on"):
+            recovery_mult = float(cfg["recovery_mult"])
+
+    alloc_mult = _clamp(
+        float(base_mult * trend_mult * breadth_mult * drawdown_mult * recovery_mult),
+        float(cfg["total_mult_min"]),
+        float(cfg["total_mult_max"]),
+    )
+    meta.update(
+        {
+            "base_mult": float(base_mult),
+            "trend_mult": float(trend_mult),
+            "breadth_mult": float(breadth_mult),
+            "drawdown_mult": float(drawdown_mult),
+            "recovery_mult": float(recovery_mult),
+            "drawdown_now": float(drawdown_now),
+            "alloc_mult": float(alloc_mult),
+        }
+    )
+    return alloc_mult, meta
+
+
 def _weighted_momentum(close, windows, weights):
     if len(windows) != len(weights) or not windows:
         return None
@@ -1082,6 +1303,10 @@ def apply_execution_guard(runtime, stock, out):
     allowed_symbols = set(stock.get("universe", []))
     allowed_symbols.add(str(stock.get("benchmark_symbol", "510300")))
     allowed_symbols.add(str(stock.get("defensive_symbol", "511010")))
+    model_cfg = stock.get("global_model", {}) or {}
+    defensive_rotation_cfg = model_cfg.get("defensive_rotation", {}) or {}
+    for sym in defensive_rotation_cfg.get("symbols", []) or []:
+        allowed_symbols.add(str(sym))
     prev_targets = []
     dropped_targets = 0
     for t in prev_targets_raw:
@@ -1201,9 +1426,12 @@ def run_global_momentum(runtime, stock, risk):
     defensive_bypass_single_max = bool(model_cfg.get("defensive_bypass_single_max", True))
     structural_cfg = _resolve_structural_cfg(model_cfg)
     structural_enabled = bool(structural_cfg["enabled"])
+    defensive_rotation_cfg = _resolve_defensive_rotation_cfg(model_cfg, defensive_symbol)
+    dual_budget_cfg = _resolve_dual_budget_cfg(model_cfg)
 
     universe = stock.get("universe", [])
-    symbols = sorted(set(universe + [benchmark_symbol, defensive_symbol]))
+    defensive_symbols = list(defensive_rotation_cfg.get("symbols", [defensive_symbol]))
+    symbols = sorted(set(universe + [benchmark_symbol, defensive_symbol] + defensive_symbols))
     data_dir = os.path.join(runtime["paths"]["data_dir"], "stock")
 
     closes = {}
@@ -1228,8 +1456,9 @@ def run_global_momentum(runtime, stock, risk):
     if defensive_symbol not in closes:
         raise RuntimeError(f"defensive data missing: {defensive_symbol}")
 
+    defensive_symbol_set = set(defensive_symbols)
     risk_symbols = [
-        s for s in closes.keys() if s != defensive_symbol and (benchmark_tradeable or s != benchmark_symbol)
+        s for s in closes.keys() if s not in defensive_symbol_set and (benchmark_tradeable or s != benchmark_symbol)
     ]
     benchmark_close = closes[benchmark_symbol]
     benchmark_ma = None
@@ -1380,9 +1609,9 @@ def run_global_momentum(runtime, stock, risk):
     )
     hist_strategy_ret, hist_bench_alloc = load_stock_return_history(history_file)
     effective_alloc, exposure_meta = evaluate_exposure_gate(hist_strategy_ret, hist_bench_alloc, alloc_pct, gate_cfg)
-    stock_capital = total_capital * effective_alloc
     single_max = float(risk["position_limits"]["stock_single_max_pct"])
     symbol_weight_caps = _parse_symbol_weight_caps(model_cfg.get("symbol_weight_caps", {}), float(single_max))
+    defensive_weights, defensive_meta = _build_defensive_weights(closes, defensive_rotation_cfg)
 
     if structural_enabled:
         eligible = [
@@ -1400,6 +1629,8 @@ def run_global_momentum(runtime, stock, risk):
     risk_governor_meta = {
         "enabled": bool(model_cfg.get("risk_governor", {}).get("enabled", False)),
         "alloc_mult": 1.0,
+        "dual_budget_enabled": bool(dual_budget_cfg.get("enabled", False)),
+        "dual_budget_alloc_mult": 1.0,
         "structural_enabled": bool(structural_enabled),
         "regime_state": str(regime_state),
         "regime_state_initial": str(regime_state_initial),
@@ -1442,8 +1673,9 @@ def run_global_momentum(runtime, stock, risk):
         "score_dispersion": 0.0,
         "top_n_effective": int(top_n_profile),
         "score_power_effective": float(score_power_eff_base),
+        "defensive_rotation": defensive_meta,
     }
-    risk_alloc = effective_alloc
+    target_total_alloc = float(effective_alloc)
 
     if regime_state in {"risk_on", "neutral"} and eligible:
         risk_alloc_base = float(effective_alloc)
@@ -1556,8 +1788,16 @@ def run_global_momentum(runtime, stock, risk):
         risk_governor_meta["signal_strength_alloc_mult"] = float(signal_strength_mult)
         risk_governor_meta["top_n_effective"] = int(top_n_eff)
         risk_governor_meta["score_power_effective"] = float(score_power_eff)
-
-        risk_alloc = float(risk_alloc_pre_rg * alloc_mult)
+        dual_alloc_mult, dual_meta = _compute_dual_budget_multiplier(
+            benchmark_close=benchmark_close,
+            regime_state=regime_state,
+            trend_strength=trend_strength_now,
+            breadth=breadth,
+            cfg=dual_budget_cfg,
+        )
+        risk_governor_meta["dual_budget"] = dual_meta
+        risk_governor_meta["dual_budget_alloc_mult"] = float(dual_alloc_mult)
+        target_total_alloc = float(risk_alloc_pre_rg * alloc_mult * dual_alloc_mult)
         risk_weights = build_risk_on_weights(
             score_map=score,
             vol_map=vol,
@@ -1569,7 +1809,17 @@ def run_global_momentum(runtime, stock, risk):
         sleeve_weights = risk_weights
         signal_reason = "risk_on" if regime_state == "risk_on" else "risk_on_neutral"
     else:
-        sleeve_weights = {defensive_symbol: 1.0}
+        dual_alloc_mult, dual_meta = _compute_dual_budget_multiplier(
+            benchmark_close=benchmark_close,
+            regime_state=regime_state,
+            trend_strength=trend_strength_now,
+            breadth=breadth,
+            cfg=dual_budget_cfg,
+        )
+        risk_governor_meta["dual_budget"] = dual_meta
+        risk_governor_meta["dual_budget_alloc_mult"] = float(dual_alloc_mult)
+        target_total_alloc = float(effective_alloc * dual_alloc_mult)
+        sleeve_weights = defensive_weights if defensive_weights else {defensive_symbol: 1.0}
         if not benchmark_trend_on:
             signal_reason = "benchmark_below_ma"
         elif phase2_stepdown_applied and regime_state == "risk_off":
@@ -1579,25 +1829,30 @@ def run_global_momentum(runtime, stock, risk):
         elif not eligible:
             signal_reason = "no_positive_momentum"
 
-    raw_targets = {s: risk_alloc * sleeve_w for s, sleeve_w in sleeve_weights.items()}
+    target_total_alloc = max(0.0, min(float(effective_alloc), float(target_total_alloc)))
+    stock_capital = total_capital * target_total_alloc
+    raw_targets = {s: target_total_alloc * sleeve_w for s, sleeve_w in sleeve_weights.items()}
     capped_targets = {}
     for s, tw in raw_targets.items():
-        if (not defensive_bypass_single_max) or s != defensive_symbol:
+        if (not defensive_bypass_single_max) or s not in defensive_symbol_set:
             capped_targets[s] = min(float(tw), _cap_for_symbol(s, float(single_max), symbol_weight_caps))
         else:
             capped_targets[s] = float(tw)
 
     used_alloc = sum(capped_targets.values())
-    remain_alloc = max(0.0, effective_alloc - used_alloc)
+    remain_alloc = max(0.0, target_total_alloc - used_alloc)
     if remain_alloc > 1e-8:
-        if defensive_symbol not in capped_targets:
-            capped_targets[defensive_symbol] = 0.0
-        if (not defensive_bypass_single_max):
-            defensive_cap = _cap_for_symbol(defensive_symbol, float(single_max), symbol_weight_caps)
-            defensive_room = max(0.0, defensive_cap - capped_targets[defensive_symbol])
-            capped_targets[defensive_symbol] += min(remain_alloc, defensive_room)
-        else:
-            capped_targets[defensive_symbol] += remain_alloc
+        defensive_fill = defensive_weights if defensive_weights else {defensive_symbol: 1.0}
+        for sym, weight in defensive_fill.items():
+            add_w = float(remain_alloc * weight)
+            if sym not in capped_targets:
+                capped_targets[sym] = 0.0
+            if (not defensive_bypass_single_max) or sym not in defensive_symbol_set:
+                defensive_cap = _cap_for_symbol(sym, float(single_max), symbol_weight_caps)
+                defensive_room = max(0.0, defensive_cap - capped_targets[sym])
+                capped_targets[sym] += min(add_w, defensive_room)
+            else:
+                capped_targets[sym] += add_w
 
     targets = [
         {"symbol": s, "target_weight": round(float(w), 4)}
@@ -1628,8 +1883,9 @@ def run_global_momentum(runtime, stock, risk):
         "mode": "global_momentum",
         "model": "dual_momentum_trend_ivol_defense",
         "capital": stock_capital,
-        "alloc_pct_effective": round(effective_alloc, 4),
+        "alloc_pct_effective": round(target_total_alloc, 4),
         "alloc_pct_base": round(alloc_pct, 4),
+        "alloc_pct_after_exposure_gate": round(effective_alloc, 4),
         "benchmark_symbol": benchmark_symbol,
         "defensive_symbol": defensive_symbol,
         "regime_on": regime_on,
@@ -1647,6 +1903,8 @@ def run_global_momentum(runtime, stock, risk):
             "regime_profiles": model_cfg.get("regime_profiles", {}),
             "regime_profile_effective": regime_profile,
             "defensive_bypass_single_max": defensive_bypass_single_max,
+            "defensive_rotation": defensive_rotation_cfg,
+            "dual_layer_budget": dual_budget_cfg,
             "symbol_weight_caps": symbol_weight_caps,
             "structural_upgrade": structural_cfg,
         },

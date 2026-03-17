@@ -18,6 +18,8 @@ from core.signal import momentum_score, volatility_score, max_drawdown_score, li
 from scripts.stock_etf.paper_forward_stock import run_paper_forward
 from scripts.stock_etf.snapshot_utils import save_history_snapshot
 
+DEFAULT_STOCK_CONFIG = "config/stock.yaml"
+
 
 def load_yaml(path):
     with open(path, "r", encoding="utf-8") as f:
@@ -502,13 +504,18 @@ def main():
         "--stock-mode",
         choices=["production", "research", "both"],
         default=None,
-        help="override stock backtest mode (default: config/stock.yaml backtest_mode)",
+        help=f"override stock backtest mode (default: {DEFAULT_STOCK_CONFIG} backtest_mode)",
+    )
+    parser.add_argument(
+        "--stock-config",
+        default=DEFAULT_STOCK_CONFIG,
+        help=f"stock strategy config path (default: {DEFAULT_STOCK_CONFIG})",
     )
     args = parser.parse_args()
 
     try:
         runtime = load_yaml("config/runtime.yaml")
-        stock_cfg = load_yaml("config/stock.yaml")
+        stock_cfg = load_yaml(args.stock_config)
         risk_cfg = load_yaml("config/risk.yaml")
     except Exception as e:
         print(f"[backtest-stock-etf] config error: {e}")
@@ -523,6 +530,7 @@ def main():
     report = {
         "ts": datetime.now().isoformat(),
         "note": "stock_etf lightweight backtest (production/research/both)",
+        "stock_config_path": args.stock_config,
         "stock": stock,
     }
     data_fingerprint = extract_data_fingerprint(stock)

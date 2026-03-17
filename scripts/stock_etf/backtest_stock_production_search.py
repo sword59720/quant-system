@@ -70,19 +70,35 @@ def compute_window_metrics(df: pd.DataFrame, start_date: Optional[str]) -> dict:
             "benchmark_sharpe_alloc": 0.0,
         }
 
-    strategy_nav = pd.Series([1.0] + x["strategy_nav"].tolist())
-    benchmark_nav = pd.Series([1.0] + x["benchmark_nav_alloc"].tolist())
+    tmp = x[["strategy_ret", "benchmark_ret_alloc"]].copy()
+    tmp["strategy_ret"] = pd.to_numeric(tmp["strategy_ret"], errors="coerce")
+    tmp["benchmark_ret_alloc"] = pd.to_numeric(tmp["benchmark_ret_alloc"], errors="coerce")
+    tmp = tmp.dropna().reset_index(drop=True)
+    if len(tmp) < 2:
+        return {
+            "rows": int(len(tmp)),
+            "strategy_annual_return": 0.0,
+            "benchmark_annual_return_alloc": 0.0,
+            "excess_annual_return_vs_alloc": 0.0,
+            "strategy_max_drawdown": 0.0,
+            "benchmark_max_drawdown_alloc": 0.0,
+            "strategy_sharpe": 0.0,
+            "benchmark_sharpe_alloc": 0.0,
+        }
+
+    strategy_nav = pd.concat([pd.Series([1.0]), (1.0 + tmp["strategy_ret"]).cumprod()], ignore_index=True)
+    benchmark_nav = pd.concat([pd.Series([1.0]), (1.0 + tmp["benchmark_ret_alloc"]).cumprod()], ignore_index=True)
     strategy_ann = annualized_return(strategy_nav, 252)
     benchmark_ann = annualized_return(benchmark_nav, 252)
     return {
-        "rows": int(len(x)),
+        "rows": int(len(tmp)),
         "strategy_annual_return": float(strategy_ann),
         "benchmark_annual_return_alloc": float(benchmark_ann),
         "excess_annual_return_vs_alloc": float(strategy_ann - benchmark_ann),
         "strategy_max_drawdown": max_drawdown(strategy_nav),
         "benchmark_max_drawdown_alloc": max_drawdown(benchmark_nav),
-        "strategy_sharpe": sharpe_ratio(x["strategy_ret"], 252),
-        "benchmark_sharpe_alloc": sharpe_ratio(x["benchmark_ret_alloc"], 252),
+        "strategy_sharpe": sharpe_ratio(tmp["strategy_ret"], 252),
+        "benchmark_sharpe_alloc": sharpe_ratio(tmp["benchmark_ret_alloc"], 252),
     }
 
 
