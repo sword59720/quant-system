@@ -126,9 +126,27 @@ global_model:
     momentum_weights: [0.50, 0.30, 0.20]
     vol_window: 20
     trend_ma_window: 60
-    min_momentum: -0.01
+    min_momentum: 0.02
     trend_filter: true
     score_power: 1.0
+    adaptive_allocation:
+      enabled: true
+      base_ratio: 0.10
+      min_ratio: 0.03
+      max_ratio: 0.30
+      neutral_add: 0.06
+      trend_ref: 0.08
+      trend_weight: 0.08
+      breadth_ref: 0.60
+      breadth_weight: 0.12
+      drawdown_window: 60
+      drawdown_ref: -0.08
+      drawdown_weight: 0.12
+      recovery_window: 20
+      recovery_ref: 0.05
+      recovery_weight: 0.06
+      calm_add: -0.02
+      stress_add: 0.05
   dual_layer_budget:
     enabled: true
     risk_on_base_mult: 1.10

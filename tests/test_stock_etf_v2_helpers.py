@@ -4,6 +4,7 @@ import pandas as pd
 
 from scripts.stock_etf.run_stock_etf import (
     _build_defensive_weights,
+    _compute_defensive_allocation_ratio,
     _compute_dual_budget_multiplier,
     _resolve_defensive_rotation_cfg,
     _resolve_dual_budget_cfg,
@@ -91,6 +92,96 @@ class TestStockEtfV2Helpers(unittest.TestCase):
         self.assertIn("518880", weights)
         self.assertEqual(meta["reason"], "momentum_rotation")
         self.assertAlmostEqual(sum(weights.values()), 1.0, places=6)
+
+    def test_adaptive_defensive_allocation_cuts_ratio_in_strong_market(self):
+        benchmark_close = pd.Series(
+            [100, 102, 104, 106, 109, 111, 114, 117, 120, 124, 127, 131],
+            dtype=float,
+        )
+        cfg = _resolve_defensive_rotation_cfg(
+            {
+                "defensive_rotation": {
+                    "enabled": True,
+                    "symbols": ["518880", "511010"],
+                    "adaptive_allocation": {
+                        "enabled": True,
+                        "base_ratio": 0.12,
+                        "min_ratio": 0.05,
+                        "max_ratio": 0.40,
+                        "neutral_add": 0.08,
+                        "trend_ref": 0.08,
+                        "trend_weight": 0.10,
+                        "breadth_ref": 0.60,
+                        "breadth_weight": 0.16,
+                        "drawdown_window": 10,
+                        "drawdown_ref": -0.08,
+                        "drawdown_weight": 0.16,
+                        "recovery_window": 5,
+                        "recovery_ref": 0.05,
+                        "recovery_weight": 0.08,
+                        "calm_add": -0.02,
+                        "stress_add": 0.06,
+                    },
+                }
+            },
+            "518880",
+        )
+        ratio, meta = _compute_defensive_allocation_ratio(
+            benchmark_close=benchmark_close,
+            regime_state="risk_on",
+            trend_strength=0.10,
+            breadth=0.82,
+            phase2_state="calm",
+            defensive_cfg=cfg,
+        )
+        self.assertLess(ratio, 0.12)
+        self.assertGreaterEqual(ratio, cfg["adaptive_min_ratio"])
+        self.assertLess(meta["target_ratio"], 0.12)
+
+    def test_adaptive_defensive_allocation_raises_ratio_in_weak_market(self):
+        benchmark_close = pd.Series(
+            [100, 101, 99, 97, 95, 94, 92, 90, 89, 88, 87, 86],
+            dtype=float,
+        )
+        cfg = _resolve_defensive_rotation_cfg(
+            {
+                "defensive_rotation": {
+                    "enabled": True,
+                    "symbols": ["518880", "511010"],
+                    "adaptive_allocation": {
+                        "enabled": True,
+                        "base_ratio": 0.12,
+                        "min_ratio": 0.05,
+                        "max_ratio": 0.40,
+                        "neutral_add": 0.08,
+                        "trend_ref": 0.08,
+                        "trend_weight": 0.10,
+                        "breadth_ref": 0.60,
+                        "breadth_weight": 0.16,
+                        "drawdown_window": 10,
+                        "drawdown_ref": -0.08,
+                        "drawdown_weight": 0.16,
+                        "recovery_window": 5,
+                        "recovery_ref": 0.05,
+                        "recovery_weight": 0.08,
+                        "calm_add": -0.02,
+                        "stress_add": 0.06,
+                    },
+                }
+            },
+            "518880",
+        )
+        ratio, meta = _compute_defensive_allocation_ratio(
+            benchmark_close=benchmark_close,
+            regime_state="neutral",
+            trend_strength=-0.06,
+            breadth=0.25,
+            phase2_state="stress",
+            defensive_cfg=cfg,
+        )
+        self.assertGreater(ratio, 0.20)
+        self.assertLessEqual(ratio, cfg["adaptive_max_ratio"])
+        self.assertGreater(meta["drawdown_term"], 0.0)
 
 
 if __name__ == "__main__":

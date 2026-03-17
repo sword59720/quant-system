@@ -425,6 +425,12 @@ def _resolve_defensive_rotation_cfg(params: dict, fallback_symbol: str) -> dict:
     if not windows:
         windows = [20, 60, 120]
     weights = _normalize_float_weights(cfg.get("momentum_weights", [0.5, 0.3, 0.2]), len(windows))
+    adaptive_cfg = cfg.get("adaptive_allocation", {}) if isinstance(cfg.get("adaptive_allocation", {}), dict) else {}
+    adaptive_enabled = bool(adaptive_cfg.get("enabled", False))
+    adaptive_min_ratio = float(adaptive_cfg.get("min_ratio", 0.0))
+    adaptive_max_ratio = float(adaptive_cfg.get("max_ratio", 0.60))
+    if adaptive_max_ratio < adaptive_min_ratio:
+        adaptive_max_ratio = adaptive_min_ratio
     return {
         "enabled": enabled,
         "symbols": symbols,
@@ -436,6 +442,23 @@ def _resolve_defensive_rotation_cfg(params: dict, fallback_symbol: str) -> dict:
         "min_momentum": float(cfg.get("min_momentum", -0.02)),
         "trend_filter": bool(cfg.get("trend_filter", True)),
         "score_power": max(0.1, float(cfg.get("score_power", 1.0))),
+        "adaptive_enabled": adaptive_enabled,
+        "adaptive_base_ratio": float(adaptive_cfg.get("base_ratio", 0.0)),
+        "adaptive_min_ratio": adaptive_min_ratio,
+        "adaptive_max_ratio": adaptive_max_ratio,
+        "adaptive_neutral_add": float(adaptive_cfg.get("neutral_add", 0.0)),
+        "adaptive_trend_ref": max(1e-6, float(adaptive_cfg.get("trend_ref", 0.08))),
+        "adaptive_trend_weight": max(0.0, float(adaptive_cfg.get("trend_weight", 0.0))),
+        "adaptive_breadth_ref": _clamp(float(adaptive_cfg.get("breadth_ref", 0.60)), 1e-6, 1.0 - 1e-6),
+        "adaptive_breadth_weight": max(0.0, float(adaptive_cfg.get("breadth_weight", 0.0))),
+        "adaptive_drawdown_window": max(20, int(adaptive_cfg.get("drawdown_window", 60))),
+        "adaptive_drawdown_ref": float(adaptive_cfg.get("drawdown_ref", -0.08)),
+        "adaptive_drawdown_weight": max(0.0, float(adaptive_cfg.get("drawdown_weight", 0.0))),
+        "adaptive_recovery_window": max(5, int(adaptive_cfg.get("recovery_window", 20))),
+        "adaptive_recovery_ref": max(1e-6, float(adaptive_cfg.get("recovery_ref", 0.05))),
+        "adaptive_recovery_weight": max(0.0, float(adaptive_cfg.get("recovery_weight", 0.0))),
+        "adaptive_calm_add": float(adaptive_cfg.get("calm_add", 0.0)),
+        "adaptive_stress_add": float(adaptive_cfg.get("stress_add", 0.0)),
         "fallback_symbol": str(fallback_symbol),
     }
 
@@ -518,6 +541,114 @@ def _build_defensive_weights(
         weights = {sym: inv_vol[sym] / total_inv for sym in inv_vol}
     meta["selected_symbols"] = list(weights.keys())
     return weights, meta
+
+
+def _signed_unit_scale(value: float, negative_ref: float, positive_ref: float) -> float:
+    if value >= 0.0:
+        return _clamp(float(value) / max(float(positive_ref), 1e-6), -1.0, 1.0)
+    return _clamp(float(value) / max(float(abs(negative_ref)), 1e-6), -1.0, 1.0)
+
+
+def _compute_defensive_allocation_ratio(
+    benchmark_close: pd.Series,
+    i: int,
+    regime_state: str,
+    trend_strength: Optional[float],
+    breadth: float,
+    phase2_state: str,
+    defensive_cfg: dict,
+) -> tuple[float, dict]:
+    meta = {
+        "enabled": bool(defensive_cfg.get("adaptive_enabled", False)),
+        "regime_state": str(regime_state),
+        "base_ratio": 0.0,
+        "trend_term": 0.0,
+        "breadth_term": 0.0,
+        "drawdown_term": 0.0,
+        "recovery_term": 0.0,
+        "phase_term": 0.0,
+        "drawdown_now": None,
+        "recent_return": None,
+        "target_ratio": 0.0,
+    }
+    if regime_state == "risk_off":
+        meta["target_ratio"] = 1.0
+        return 1.0, meta
+    if (not meta["enabled"]) or benchmark_close is None or i < 4:
+        return 0.0, meta
+
+    ratio = float(defensive_cfg.get("adaptive_base_ratio", 0.0))
+    if regime_state == "neutral":
+        ratio += float(defensive_cfg.get("adaptive_neutral_add", 0.0))
+
+    trend_term = 0.0
+    if trend_strength is not None:
+        trend_term = float(defensive_cfg.get("adaptive_trend_weight", 0.0)) * _signed_unit_scale(
+            float(trend_strength),
+            negative_ref=float(defensive_cfg.get("adaptive_trend_ref", 0.08)),
+            positive_ref=float(defensive_cfg.get("adaptive_trend_ref", 0.08)),
+        )
+        ratio -= trend_term
+
+    breadth_ref = float(defensive_cfg.get("adaptive_breadth_ref", 0.60))
+    breadth_norm = _signed_unit_scale(
+        float(breadth) - breadth_ref,
+        negative_ref=breadth_ref,
+        positive_ref=1.0 - breadth_ref,
+    )
+    breadth_term = float(defensive_cfg.get("adaptive_breadth_weight", 0.0)) * breadth_norm
+    ratio -= breadth_term
+
+    dd_window = int(defensive_cfg.get("adaptive_drawdown_window", 60))
+    start = max(0, i - dd_window + 1)
+    dd_slice = benchmark_close.iloc[start : i + 1]
+    peak = float(dd_slice.max()) if len(dd_slice) > 0 else float(benchmark_close.iloc[i])
+    drawdown_now = float(benchmark_close.iloc[i] / max(peak, 1e-8) - 1.0)
+    drawdown_term = float(defensive_cfg.get("adaptive_drawdown_weight", 0.0)) * _clamp(
+        abs(min(drawdown_now, 0.0)) / max(abs(float(defensive_cfg.get("adaptive_drawdown_ref", -0.08))), 1e-6),
+        0.0,
+        1.0,
+    )
+    ratio += drawdown_term
+
+    recovery_term = 0.0
+    rec_window = int(defensive_cfg.get("adaptive_recovery_window", 20))
+    if i >= rec_window:
+        recent_return = float(benchmark_close.iloc[i] / benchmark_close.iloc[i - rec_window] - 1.0)
+        meta["recent_return"] = recent_return
+        recovery_term = float(defensive_cfg.get("adaptive_recovery_weight", 0.0)) * _clamp(
+            max(recent_return, 0.0) / max(float(defensive_cfg.get("adaptive_recovery_ref", 0.05)), 1e-6),
+            0.0,
+            1.0,
+        )
+        ratio -= recovery_term
+
+    phase_term = 0.0
+    if str(phase2_state) == "stress":
+        phase_term = float(defensive_cfg.get("adaptive_stress_add", 0.0))
+        ratio += phase_term
+    elif str(phase2_state) == "calm":
+        phase_term = float(defensive_cfg.get("adaptive_calm_add", 0.0))
+        ratio += phase_term
+
+    ratio = _clamp(
+        float(ratio),
+        float(defensive_cfg.get("adaptive_min_ratio", 0.0)),
+        float(defensive_cfg.get("adaptive_max_ratio", 0.60)),
+    )
+    meta.update(
+        {
+            "base_ratio": float(defensive_cfg.get("adaptive_base_ratio", 0.0)),
+            "trend_term": float(trend_term),
+            "breadth_term": float(breadth_term),
+            "drawdown_term": float(drawdown_term),
+            "recovery_term": float(recovery_term),
+            "phase_term": float(phase_term),
+            "drawdown_now": float(drawdown_now),
+            "target_ratio": float(ratio),
+        }
+    )
+    return float(ratio), meta
 
 
 def _resolve_dual_budget_cfg(params: dict) -> dict:
@@ -1100,8 +1231,18 @@ def build_signal(
         )
         risk_governor_meta["dual_budget"] = dual_meta
         risk_governor_meta["dual_budget_alloc_mult"] = float(dual_alloc_mult)
-        risk_alloc = float(risk_alloc_pre_rg * alloc_mult * dual_alloc_mult)
-        target_total_alloc = float(min(alloc_pct, max(0.0, risk_alloc)))
+        target_total_alloc = float(risk_alloc_pre_rg * alloc_mult * dual_alloc_mult)
+        defensive_ratio, defensive_alloc_meta = _compute_defensive_allocation_ratio(
+            benchmark_close=benchmark_close,
+            i=i,
+            regime_state=regime_state,
+            trend_strength=trend_strength_now,
+            breadth=breadth,
+            phase2_state=phase2_vol_state,
+            defensive_cfg=defensive_rotation_cfg,
+        )
+        risk_governor_meta["defensive_rotation"]["adaptive_allocation"] = defensive_alloc_meta
+        risk_governor_meta["defensive_rotation"]["target_ratio"] = float(defensive_ratio)
         risk_weights = build_risk_on_weights(
             scores=scores,
             picks=picks,
@@ -1109,26 +1250,6 @@ def build_signal(
             score_floor=score_floor_eff,
             score_power=score_power_eff,
         )
-        for s, w in risk_weights.items():
-            target[s] = risk_alloc * w
-        for s in picks:
-            if (not defensive_bypass_single_max) or s not in defensive_symbol_set:
-                target[s] = min(
-                    target[s],
-                    _cap_for_symbol(s, float(single_max), symbol_weight_caps),
-                )
-        used = sum(target.values())
-        remain = max(0.0, target_total_alloc - used)
-        if remain > 1e-8:
-            defensive_fill = defensive_weights if defensive_weights else {defensive_symbol: 1.0}
-            for sym, weight in defensive_fill.items():
-                add_w = float(remain * weight)
-                if (not defensive_bypass_single_max) or sym not in defensive_symbol_set:
-                    defensive_cap = _cap_for_symbol(sym, float(single_max), symbol_weight_caps)
-                    room = max(0.0, defensive_cap - target.get(sym, 0.0))
-                    target[sym] = target.get(sym, 0.0) + min(room, add_w)
-                else:
-                    target[sym] = target.get(sym, 0.0) + add_w
         reason = "risk_on" if regime_state == "risk_on" else "risk_on_neutral"
     else:
         dual_alloc_mult, dual_meta = _compute_dual_budget_multiplier(
@@ -1142,9 +1263,12 @@ def build_signal(
         risk_governor_meta["dual_budget"] = dual_meta
         risk_governor_meta["dual_budget_alloc_mult"] = float(dual_alloc_mult)
         target_total_alloc = float(min(alloc_pct, max(0.0, alloc_pct * dual_alloc_mult)))
-        defensive_fill = defensive_weights if defensive_weights else {defensive_symbol: 1.0}
-        for sym, weight in defensive_fill.items():
-            target[sym] = float(target_total_alloc * weight)
+        risk_governor_meta["defensive_rotation"]["adaptive_allocation"] = {
+            "enabled": bool(defensive_rotation_cfg.get("adaptive_enabled", False)),
+            "regime_state": str(regime_state),
+            "target_ratio": 1.0,
+        }
+        risk_governor_meta["defensive_rotation"]["target_ratio"] = 1.0
         if not benchmark_trend_on:
             reason = "benchmark_below_ma"
         elif phase2_stepdown_applied and regime_state == "risk_off":
@@ -1153,6 +1277,44 @@ def build_signal(
             reason = "breadth_risk_off"
         elif not eligible:
             reason = "no_positive_momentum"
+
+    target_total_alloc = float(min(alloc_pct, max(0.0, target_total_alloc)))
+    if regime_state in {"risk_on", "neutral"} and eligible:
+        defensive_target_alloc = float(
+            max(0.0, target_total_alloc * float(risk_governor_meta["defensive_rotation"].get("target_ratio", 0.0)))
+        )
+        risk_target_alloc = float(max(0.0, target_total_alloc - defensive_target_alloc))
+        raw_targets = {s: risk_target_alloc * weight for s, weight in risk_weights.items()}
+        if defensive_target_alloc > 1e-8:
+            defensive_fill = defensive_weights if defensive_weights else {defensive_symbol: 1.0}
+            for sym, weight in defensive_fill.items():
+                raw_targets[sym] = raw_targets.get(sym, 0.0) + defensive_target_alloc * weight
+    else:
+        defensive_fill = defensive_weights if defensive_weights else {defensive_symbol: 1.0}
+        raw_targets = {sym: float(target_total_alloc * weight) for sym, weight in defensive_fill.items()}
+
+    capped_targets = {}
+    for sym, weight in raw_targets.items():
+        if (not defensive_bypass_single_max) or sym not in defensive_symbol_set:
+            capped_targets[sym] = min(float(weight), _cap_for_symbol(sym, float(single_max), symbol_weight_caps))
+        else:
+            capped_targets[sym] = float(weight)
+
+    used = sum(capped_targets.values())
+    remain = max(0.0, target_total_alloc - used)
+    if remain > 1e-8:
+        defensive_fill = defensive_weights if defensive_weights else {defensive_symbol: 1.0}
+        for sym, weight in defensive_fill.items():
+            add_w = float(remain * weight)
+            if sym not in capped_targets:
+                capped_targets[sym] = 0.0
+            if (not defensive_bypass_single_max) or sym not in defensive_symbol_set:
+                defensive_cap = _cap_for_symbol(sym, float(single_max), symbol_weight_caps)
+                room = max(0.0, defensive_cap - capped_targets[sym])
+                capped_targets[sym] += min(room, add_w)
+            else:
+                capped_targets[sym] += add_w
+    target.update(capped_targets)
 
     score_rows = []
     for s in sorted(scores.keys(), key=lambda x: scores[x]["score"], reverse=True):
