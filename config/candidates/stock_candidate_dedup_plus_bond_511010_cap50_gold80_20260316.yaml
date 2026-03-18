@@ -29,7 +29,7 @@ global_model:
       score_mix: 0.00
       score_floor: 0.00
       score_power: 0.85
-      alloc_mult: 1.08
+      alloc_mult: 1.05
       turbo_enabled: false
       turbo_trend_strength_min: 0.03
       turbo_breadth_min: 0.78
@@ -52,7 +52,7 @@ global_model:
     relative_momentum_weight: 0.00
     asset_trend_ma_window: 80
     breadth_on_threshold: 0.55
-    breadth_off_threshold: 0.10
+    breadth_off_threshold: 0.15
     neutral_alloc_mult: 1.00
     neutral_top_n: 2
     trend_strength_k: 2.0
@@ -109,67 +109,15 @@ global_model:
   risk_governor:
     enabled: true
     vol_window: 20
-    target_daily_vol: 0.0110
+    target_daily_vol: 0.0095
     min_alloc_mult: 0.45
-    max_alloc_mult: 0.95
+    max_alloc_mult: 0.70
     dd_window: 100
-    dd_trigger: -0.12
-    dd_alloc_mult: 0.35
+    dd_trigger: -0.08
+    dd_alloc_mult: 0.20
     momentum_window: 40
     momentum_trigger: 0.0
     momentum_alloc_mult: 1.00
-  defensive_rotation:
-    enabled: true
-    symbols: ["518880", "511010", "511990"]
-    top_n: 1
-    momentum_windows: [20, 60, 120]
-    momentum_weights: [0.50, 0.30, 0.20]
-    vol_window: 20
-    trend_ma_window: 60
-    min_momentum: 0.02
-    trend_filter: true
-    score_power: 1.0
-    adaptive_allocation:
-      enabled: true
-      base_ratio: 0.10
-      min_ratio: 0.03
-      max_ratio: 0.30
-      neutral_add: 0.06
-      trend_ref: 0.08
-      trend_weight: 0.08
-      breadth_ref: 0.60
-      breadth_weight: 0.12
-      drawdown_window: 60
-      drawdown_ref: -0.08
-      drawdown_weight: 0.12
-      recovery_window: 20
-      recovery_ref: 0.05
-      recovery_weight: 0.06
-      calm_add: -0.02
-      stress_add: 0.05
-  dual_layer_budget:
-    enabled: true
-    risk_on_base_mult: 1.14
-    neutral_base_mult: 0.95
-    risk_off_base_mult: 0.32
-    strong_trend_threshold: 0.06
-    weak_trend_threshold: 0.00
-    strong_trend_mult: 1.08
-    weak_trend_mult: 0.92
-    strong_breadth_threshold: 0.64
-    weak_breadth_threshold: 0.36
-    strong_breadth_mult: 1.10
-    weak_breadth_mult: 0.88
-    drawdown_window: 60
-    mild_drawdown_trigger: -0.06
-    hard_drawdown_trigger: -0.10
-    mild_drawdown_mult: 0.92
-    hard_drawdown_mult: 0.72
-    recovery_window: 20
-    recovery_threshold: 0.05
-    recovery_mult: 1.04
-    total_mult_min: 0.30
-    total_mult_max: 1.25
   risk_overlay:
     enabled: true
     monitor_file: ./outputs/reports/stock_paper_forward_latest.json
@@ -195,25 +143,22 @@ global_model:
       pass: 0.70
       warn: 0.60
       risk: 0.50
-  # 当前主候选（2026-03-16）：
-  # - 去除明显重复资产：159949、510500
-  # - 新增 511010 作为债券防护仓候选
-  # - 经修复 513100 历史混合标尺后，cap40 优于 cap50
   symbol_weight_caps:
     "159633": 0.25
     "159819": 0.25
     "513100": 0.35
-    "511010": 0.40
+    "511010": 0.50
+    "518880": 0.80
 
 universe:
-  - "159633" # 新能车ETF（主题卫星，限仓）
-  - "159915" # 创业板ETF
-  - "159819" # 人工智能ETF（主题增强，限仓）
-  - "510300" # 沪深300ETF
-  - "512100" # 中证1000ETF
-  - "513100" # 纳指ETF（已清洗历史数据）
-  - "518880" # 黄金ETF（主防守）
-  - "511010" # 国债ETF（防守补强）
+  - "159633"
+  - "159915"
+  - "159819"
+  - "510300"
+  - "512100"
+  - "513100"
+  - "518880"
+  - "511010"
 
 signal:
   momentum_lookback_days: [20, 60]

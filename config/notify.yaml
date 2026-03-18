@@ -1,4 +1,20 @@
 enabled: true
+
+# 最新默认：走 OpenClaw 官方消息通道（当前改用 Feishu 渠道）
+provider: openclaw
+fallback_provider: bridge
+
+openclaw_message:
+  binary: "openclaw"
+  channel: "feishu"
+  # Feishu 直聊目标 ID（来自当前已建立的 direct session）
+  target: "ou_62be2aabd5de78b069712624f055ebd1"
+  account: ""
+  timeout_sec: 60
+  dry_run: false
+  extra_args: []
+
+# 旧自建 bridge 作为回退保留，避免迁移期通知中断
 wecom_bridge:
   endpoint: "http://16.144.176.211:4000/proactive/send"
   to_user: "HaoJianCai"

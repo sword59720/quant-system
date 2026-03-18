@@ -1,4 +1,4 @@
-enabled: true
+enabled: false
 market: CRYPTO_SWAP
 exchange: htx_direct
 mode: momentum_rotation_4h

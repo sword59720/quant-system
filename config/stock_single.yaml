@@ -1,4 +1,4 @@
-enabled: true
+enabled: false
 market: CN_STOCK_SINGLE
 mode: single_stock_hourly
 

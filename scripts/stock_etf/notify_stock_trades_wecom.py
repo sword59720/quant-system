@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""推送股票交易指令到企业微信。"""
+"""推送股票交易指令到飞书/通知通道。"""
 
 from __future__ import annotations
 
 import argparse
-import glob
 import hashlib
 import json
 import os
@@ -55,6 +54,12 @@ def now_in_timezone(tz_name: str) -> datetime:
     return datetime.now()
 
 
+def _fmt_weight(weight: Optional[float]) -> str:
+    if weight is None:
+        return "N/A"
+    return f"{weight * 100.0:.2f}%"
+
+
 def _fmt_weight_delta(delta_weight: Optional[float]) -> str:
     if delta_weight is None:
         return "N/A"
@@ -82,6 +87,8 @@ def build_dedup_key(trades: Dict[str, Any], tz_name: str) -> str:
             "action": str(o.get("action", "")).strip().upper(),
             "amount_quote": round(safe_float(o.get("amount_quote")), 2),
             "delta_weight": round(safe_float(o.get("delta_weight")), 6),
+            "estimated_shares": o.get("estimated_shares"),
+            "ref_price": o.get("ref_price"),
         }
         for o in (trades.get("orders", []) or [])
     ]
@@ -95,14 +102,12 @@ def _position_hint(position_file: str, stale_hours: int) -> Tuple[List[str], boo
     stale = False
     if not os.path.exists(position_file):
         return [f"持仓文件缺失: {position_file}"], True
-
     try:
         pos = load_json(position_file)
         items = pos.get("positions", []) if isinstance(pos, dict) else []
         lines.append(f"本地持仓记录数: {len(items)}")
     except Exception as e:
         return [f"持仓文件读取失败: {position_file} ({e})"], True
-
     try:
         mtime = datetime.fromtimestamp(os.path.getmtime(position_file))
         age_hours = (datetime.now() - mtime).total_seconds() / 3600.0
@@ -112,36 +117,23 @@ def _position_hint(position_file: str, stale_hours: int) -> Tuple[List[str], boo
             stale = True
     except Exception:
         pass
-
     return lines, stale
 
 
 def _fmt_positions(title: str, positions: List[Dict[str, Any]]) -> List[str]:
     lines = [title]
     if not positions:
-        lines.append("  (空仓)")
+        lines.append(" • (空仓)")
         return lines
     for p in positions:
         sym = str(p.get("symbol", "")).strip()
         w = p.get("weight")
-        if w is None:
-            lines.append(f"  - {sym}")
-        else:
-            lines.append(f"  - {sym} weight={safe_float(w):.4f}")
+        qty = p.get("quantity")
+        row = f" • {sym}: {_fmt_weight(safe_float(w))}" if w is not None else f" • {sym}"
+        if qty is not None:
+            row += f", {qty}股"
+        lines.append(row)
     return lines
-
-
-def _load_latest_execution_record() -> Dict[str, Any]:
-    files = sorted(glob.glob("./outputs/orders/execution_record_*.json"), key=os.path.getmtime, reverse=True)
-    for fp in files:
-        try:
-            rec = load_json(fp)
-        except Exception:
-            continue
-        # 只使用股票执行记录，避免误读到 crypto 的 execution_record
-        if str(rec.get("market", "")).strip().lower() == "stock":
-            return rec
-    return {}
 
 
 def build_trade_message(trades: Dict[str, Any], stale_position_hours: int = 36) -> str:
@@ -150,50 +142,46 @@ def build_trade_message(trades: Dict[str, Any], stale_position_hours: int = 36) 
     capital_market = safe_float(trades.get("capital_market"))
     orders = trades.get("orders", []) or []
     position_file = str(trades.get("position_file", "./outputs/state/stock_positions.json"))
+    current_positions = trades.get("current_positions", []) or []
+    target_positions = trades.get("target_positions", []) or []
+    estimated_after_positions = trades.get("estimated_after_positions", []) or []
 
+    date_text = _safe_iso_date(ts, now_in_timezone("Asia/Shanghai").strftime("%Y-%m-%d"))
     lines = [
-        f"时间: {ts}",
-        f"总资金: ¥{capital_total:,.2f}",
-        f"股票资金: ¥{capital_market:,.2f}",
-        f"指令数: {len(orders)}",
+        f"日期: {date_text}",
+        f"执行模式: paper_manual",
+        f"总资金基准: ¥{capital_total:,.0f}",
     ]
 
-    # 优先使用最新 execution_record（含交易前后仓位、数量、价格）
-    rec = _load_latest_execution_record()
-    if rec:
-        lines.append("")
-        lines.extend(_fmt_positions("交易前仓位:", rec.get("positions_before", []) or []))
-        lines.append("交易指令:")
-        rows = rec.get("order_results", []) or []
-        if not rows:
-            lines.append("  (无)")
-        else:
-            for i, r in enumerate(rows, 1):
-                lines.append(
-                    f"{i}. {str(r.get('action','')).upper():<4} {str(r.get('symbol','')).strip()} "
-                    f"数量={r.get('quantity','N/A')} 价格={r.get('order_price','N/A')} 金额¥{safe_float(r.get('amount_quote')):,.2f}"
-                )
-        lines.extend(_fmt_positions("交易后仓位:", rec.get("positions_after", []) or []))
+    lines.extend(_fmt_positions("当前仓位:", current_positions))
+
+    if orders:
+        lines.extend(_fmt_positions("目标仓位:", target_positions))
+        lines.append("调仓指令:")
+        sell_orders = [o for o in orders if str(o.get("action", "")).upper() == "SELL"]
+        buy_orders = [o for o in orders if str(o.get("action", "")).upper() == "BUY"]
+        ordered = sell_orders + buy_orders
+        for idx, order in enumerate(ordered, 1):
+            symbol = str(order.get("symbol", "")).strip()
+            action = str(order.get("action", "BUY")).strip().upper()
+            amount = safe_float(order.get("amount_quote"))
+            ref_price = order.get("ref_price")
+            est_shares = order.get("estimated_shares")
+            est_lots = order.get("estimated_lots")
+            line = f" {idx}. {action} {symbol} 金额≈¥{amount:,.0f}"
+            if ref_price is not None:
+                line += f" 参考价≈{safe_float(ref_price):.3f}"
+            if est_shares is not None and est_lots is not None:
+                line += f" 估算数量≈{int(est_shares)}股({int(est_lots)}手)"
+            lines.append(line)
     else:
-        if orders:
-            lines.append("交易指令:")
-            for idx, order in enumerate(orders, 1):
-                symbol = str(order.get("symbol", "")).strip()
-                action = str(order.get("action", "BUY")).strip().upper()
-                amount = safe_float(order.get("amount_quote"))
-                delta_weight_val = order.get("delta_weight")
-                delta_weight = None if delta_weight_val is None else safe_float(delta_weight_val, 0.0)
-                lines.append(
-                    f"{idx}. {action:<4} {symbol} 金额¥{amount:,.2f}  Δ仓位{_fmt_weight_delta(delta_weight)}"
-                )
-        else:
-            lines.append("今日无调仓指令（维持当前仓位）。")
+        lines.append("调仓指令:")
+        lines.append(" 今日无调仓，维持当前仓位。")
 
     pos_lines, _ = _position_hint(position_file, stale_hours=stale_position_hours)
-    lines.append("")
-    lines.append("持仓校验:")
-    lines.extend(pos_lines)
-    lines.append("说明: 当前按纸面交易执行，指令发出即视为成交；请人工在券商端同步执行。")
+    if pos_lines:
+        lines.extend(pos_lines)
+    lines.append("说明: 实际成交请以盘中价格为准。执行后请更新 stock_positions.json。")
     return "\n".join(lines)
 
 
@@ -202,16 +190,11 @@ def safe_send_wecom_message(content: str, title: str, dedup_key: str, dedup_hour
         from core.notify_wecom import send_wecom_message
     except Exception as e:
         return False, f"notify module unavailable: {e}"
-    return send_wecom_message(
-        content=content,
-        title=title,
-        dedup_key=dedup_key,
-        dedup_hours=dedup_hours,
-    )
+    return send_wecom_message(content=content, title=title, dedup_key=dedup_key, dedup_hours=dedup_hours)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="发送股票交易指令到企业微信")
+    parser = argparse.ArgumentParser(description="发送股票交易指令到飞书")
     parser.add_argument("--runtime", default="./config/runtime.yaml", help="runtime 配置路径")
     parser.add_argument("--file", default="./outputs/orders/stock_trades.json", help="交易指令文件路径")
     parser.add_argument("--title", default="股票交易指令", help="通知标题")
@@ -269,13 +252,8 @@ def main() -> int:
         print("[stock-trade-notify] dry-run only")
         return EXIT_OK
 
-    ok, detail = safe_send_wecom_message(
-        content=msg,
-        title=title,
-        dedup_key=dedup_key,
-        dedup_hours=dedup_hours,
-    )
-    print(f"[stock-trade-notify] wecom {'ok' if ok else 'fail'}: {detail}")
+    ok, detail = safe_send_wecom_message(content=msg, title=title, dedup_key=dedup_key, dedup_hours=dedup_hours)
+    print(f"[stock-trade-notify] notify {'ok' if ok else 'fail'}: {detail}")
     return EXIT_OK if ok else EXIT_OUTPUT_ERROR
 
 
