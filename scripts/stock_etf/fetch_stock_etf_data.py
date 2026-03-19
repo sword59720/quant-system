@@ -194,7 +194,17 @@ def main():
 
     benchmark_symbol = stock_cfg.get("benchmark_symbol", "510300")
     defensive_symbol = stock_cfg.get("defensive_symbol", "518880")
-    symbols = sorted(set((stock_cfg.get("universe", []) or []) + [benchmark_symbol, defensive_symbol]))
+    defensive_rotation_symbols = (
+        ((stock_cfg.get("global_model", {}) or {}).get("defensive_rotation", {}) or {}).get("symbols", [])
+        or []
+    )
+    symbols = sorted(
+        set(
+            (stock_cfg.get("universe", []) or [])
+            + [benchmark_symbol, defensive_symbol]
+            + defensive_rotation_symbols
+        )
+    )
     data_dir = os.path.join(runtime["paths"]["data_dir"], "stock")
     ensure_dir(data_dir)
 
