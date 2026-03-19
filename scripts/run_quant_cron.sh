@@ -27,7 +27,6 @@ start_epoch=$(date +%s)
 start_human=$(date '+%F %T %Z')
 
 echo "[$(date '+%F %T')] [cron] run_quant start" >> "${LOG_FILE}"
-notify "量化定时任务开始" "[提醒] 定时任务已启动\n时间: ${start_human}\n任务: scripts/run_quant.py"
 
 "${PYTHON_BIN}" -m py_compile scripts/stock_single/fetch_stock_single_data.py >/dev/null 2>&1
 if [ $? -ne 0 ]; then
@@ -48,7 +47,20 @@ end_human=$(date '+%F %T %Z')
 
 if [ ${rc} -eq 0 ]; then
   echo "[$(date '+%F %T')] [cron] run_quant success elapsed=${elapsed}s" >> "${LOG_FILE}"
-  notify "量化定时任务完成" "[提醒] 定时任务执行完成\n开始: ${start_human}\n结束: ${end_human}\n耗时: ${elapsed}s"
+
+  # 发送标准 ETF 仓位/调仓报告（符合既有飞书模板）
+  "${PYTHON_BIN}" scripts/stock_etf/generate_trades_stock_etf.py >> "${LOG_FILE}" 2>&1
+  rep_rc=$?
+  if [ ${rep_rc} -eq 0 ]; then
+    "${PYTHON_BIN}" scripts/stock_etf/notify_stock_trades_wecom.py --send-empty >> "${LOG_FILE}" 2>&1
+    rep_rc=$?
+  fi
+
+  if [ ${rep_rc} -ne 0 ]; then
+    notify "量化定时任务告警" "[提醒] 主任务成功，但仓位报告发送失败\n开始: ${start_human}\n结束: ${end_human}\n耗时: ${elapsed}s"
+    exit ${rep_rc}
+  fi
+
   exit 0
 elif [ ${rc} -eq 124 ]; then
   echo "[$(date '+%F %T')] [cron] run_quant timeout elapsed=${elapsed}s" >> "${LOG_FILE}"
