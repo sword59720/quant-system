@@ -1,0 +1,9 @@
+   # 环境变量注入 (cron 运行时默认环境变量极少，必须显式声明)
+   TZ=Asia/Shanghai
+   LANG=C.UTF-8
+   LC_ALL=C.UTF-8
+
+   # 每天 16:05 运行量化任务（含开始/完成/超时提醒）
+   5 16 * * 1-5 cd /home/node/projects/quant-system && /home/node/projects/quant-system/scripts/run_quant_cron.sh
+
+   # (注意：此文件最后一行必须是一个空行)

@@ -2,8 +2,8 @@ enabled: true
 env: live          # 全局运行环境（主要影响 crypto 等自动执行链路）: paper | live
 strategy_execution:
   stock_etf: paper_manual   # paper | paper_manual | live
-  stock_single: live
-  crypto: live
+  stock_single: paper_manual
+  crypto: paper
 # 兼容旧配置：股票默认券商（当未配置 stock_brokers 时生效）
 broker: guotou     # guotou | myquant
 # 按策略覆盖券商（优先级高于 broker）

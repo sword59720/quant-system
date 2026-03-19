@@ -4,3 +4,4 @@ numpy
 akshare
 ccxt
 requests
+baostock

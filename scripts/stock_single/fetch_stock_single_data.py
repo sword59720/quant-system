@@ -1917,6 +1917,28 @@ def fetch_fund_flow_with_baostock(symbol_code: str, canonical: str, start_date: 
     """
     import baostock as bs
     import time
+    import signal
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _time_limit(seconds: int):
+        if seconds <= 0:
+            yield
+            return
+
+        def _handler(signum, frame):
+            raise TimeoutError(f"operation timed out after {seconds}s")
+
+        prev = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, _handler)
+        signal.alarm(seconds)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, prev)
+
+    bs_query_timeout_sec = int(os.getenv("QS_BAOSTOCK_QUERY_TIMEOUT_SEC", "45"))
 
     max_retries = 3
     retry_delay = 2  # seconds
@@ -1961,14 +1983,15 @@ def fetch_fund_flow_with_baostock(symbol_code: str, canonical: str, start_date: 
                 
                 print(f"[stock-single-data][baostock-flow] Fetching from {bs_start_date} to {bs_end_date}")
                 
-                rs = bs.query_history_k_data_plus(
-                    code=bs_code,
-                    fields="date,open,high,low,close,volume,amount,turn",
-                    start_date=bs_start_date,
-                    end_date=bs_end_date,
-                    frequency="d",
-                    adjustflag="2"  # Forward adjust
-                )
+                with _time_limit(bs_query_timeout_sec):
+                    rs = bs.query_history_k_data_plus(
+                        code=bs_code,
+                        fields="date,open,high,low,close,volume,amount,turn",
+                        start_date=bs_start_date,
+                        end_date=bs_end_date,
+                        frequency="d",
+                        adjustflag="2"  # Forward adjust
+                    )
             except Exception as e:
                 print(f"[stock-single-data][baostock-flow] Date format error: {e}")
                 bs.logout()
@@ -2001,7 +2024,8 @@ def fetch_fund_flow_with_baostock(symbol_code: str, canonical: str, start_date: 
                     return pd.DataFrame(columns=["date", "main_net_inflow", "main_net_inflow_ratio", "ultra_large_net_inflow", "large_net_inflow", "mid_net_inflow", "small_net_inflow"])
             
             # Convert to DataFrame
-            df = rs.get_data()
+            with _time_limit(bs_query_timeout_sec):
+                df = rs.get_data()
             bs.logout()
             
             # Validate data
